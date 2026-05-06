@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -180,6 +181,21 @@ def post_update(
     return False, str(payload.get("message") or payload)
 
 
+def _mask_endpoint(url: str) -> str:
+    """
+    避免在 logs 揭露完整 URL。
+    回傳格式：<host_hash8>/<basename>
+    """
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").encode("utf-8")
+        host_hash = hashlib.sha256(host).hexdigest()[:8] if host else "nohost"
+        basename = (parsed.path.rsplit("/", 1)[-1] or "").strip() or "path"
+        return f"{host_hash}/{basename}"
+    except Exception:
+        return "masked"
+
+
 def main() -> int:
     settings = load_settings()
 
@@ -201,8 +217,8 @@ def main() -> int:
     if settings.cookie:
         session.headers.update({"Cookie": settings.cookie})
 
-    print(f"LIST    {settings.list_url}")
-    print(f"POST    {update_url}")
+    print(f"LIST_URL set={bool(settings.list_url)} id={_mask_endpoint(settings.list_url)}")
+    print(f"POST_URL set={bool(update_url)} id={_mask_endpoint(update_url)}")
     print(f"FILTER  {settings.filter_status}")
     print(f"DELAY   {settings.delay_seconds}s  DRY_RUN={settings.dry_run}")
 
