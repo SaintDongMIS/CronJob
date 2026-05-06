@@ -1,0 +1,39 @@
+# 定時更新列表中指定狀態列（等同網頁「更新狀態」）
+# 選填 secrets：ERP_COOKIE、ERP_DELAY_SEC
+# 需在 Repo Variables 設定：
+#   ERP_LIST_URL
+
+name: ERP 借貸平衡 — 更新沒有在鼎新
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每 30 分鐘觸發一次；實際是否執行由 scripts/should_run.py 以台灣行事曆與時間窗判斷
+    - cron: "*/30 * * * *"
+
+env:
+  ERP_LIST_URL: ${{ vars.ERP_LIST_URL }}
+
+jobs:
+  update-rows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check run window (Taiwan)
+        id: gate
+        run: python scripts/should_run.py
+
+      - name: Run updater
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          ERP_COOKIE: ${{ secrets.ERP_COOKIE }}
+          ERP_DELAY_SEC: ${{ secrets.ERP_DELAY_SEC }}
+        run: python scripts/erp_update_not_in_dingxin.py
