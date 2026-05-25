@@ -135,8 +135,14 @@ def digest_window(slot: str, now: datetime) -> tuple[datetime, datetime, str]:
 def _github_session() -> tuple[str, dict[str, str]]:
     repo = os.environ.get(ENV_GITHUB_REPOSITORY, "").strip()
     token = os.environ.get(ENV_GITHUB_TOKEN, "").strip()
-    if not repo or not token:
-        raise RuntimeError("需要 GITHUB_REPOSITORY 與 GITHUB_TOKEN（Actions 內建或 PAT）")
+    if not repo:
+        raise RuntimeError(
+            "需要 GITHUB_REPOSITORY（Actions 請在 workflow 傳入 github.repository）"
+        )
+    if not token:
+        raise RuntimeError(
+            "需要 GITHUB_TOKEN（Actions 請在 workflow 傳入 secrets.GITHUB_TOKEN）"
+        )
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",

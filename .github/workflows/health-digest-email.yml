@@ -19,6 +19,9 @@ on:
 jobs:
   send-health-email:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +48,8 @@ jobs:
 
       - name: Send health digest email
         env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DIGEST_SLOT: ${{ steps.slot.outputs.value }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
