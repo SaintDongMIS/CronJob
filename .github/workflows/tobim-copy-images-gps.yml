@@ -1,0 +1,36 @@
+# ToBim 環景：未完成巷弄補 jpg/txt（copy-images-and-gps-sse）
+# Secrets：ASSETS_BASE_URL（可選）、TOBIM_* 、與 ERP 相同排程窗
+
+name: ToBim 環景 — 複製圖片與 GPS
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+env:
+  ASSETS_BASE_URL: ${{ vars.ASSETS_BASE_URL || secrets.ASSETS_BASE_URL }}
+
+jobs:
+  copy-images-gps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check run window (Taiwan)
+        id: gate
+        run: python scripts/should_run.py
+
+      - name: Run ToBim updater
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          # 選填 Variables：TOBIM_DRY_RUN=1 可改為試跑；其餘參數用腳本內建預設
+          TOBIM_DRY_RUN: ${{ vars.TOBIM_DRY_RUN || secrets.TOBIM_DRY_RUN || '0' }}
+        run: python scripts/tobim_copy_images_gps.py
