@@ -319,7 +319,7 @@ def render_html(
       </tbody>
     </table>
     <p style="margin:16px 0 0;font-size:12px;color:#888;">
-      執行窗參考：工作日 08:30–17:30（should_run.py）。詳細 log 請至 GitHub Actions。
+      執行窗參考：ERP 工作日 08:30–17:30；ToBim 工作日 17:30 後～翌日 08:30 前（should_run.py）。詳細 log 請至 GitHub Actions。
     </p>
   </div>
 </body>

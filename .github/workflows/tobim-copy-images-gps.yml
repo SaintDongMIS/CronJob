@@ -1,5 +1,5 @@
 # ToBim 環景：未完成巷弄補 jpg/txt（copy-images-and-gps-sse）
-# Secrets：ASSETS_BASE_URL（可選）、TOBIM_* 、與 ERP 相同排程窗
+# Gate：工作日下班後（17:30 後～翌日 08:30 前）；國定假日不執行
 
 name: ToBim 環景 — 複製圖片與 GPS
 
@@ -27,6 +27,8 @@ jobs:
 
       - name: Check run window (Taiwan)
         id: gate
+        env:
+          SHOULD_RUN_MODE: offhours
         run: python scripts/should_run.py
 
       - name: Run ToBim updater
