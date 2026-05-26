@@ -6,6 +6,8 @@
 - 非台灣政府行政機關「放假日」（包含週末與調整放假）
 - 時間介於 08:30（含）～17:30（含）
 
+觸發頻率（每 30 分鐘 / 每 2 小時）由各 workflow 的 cron 決定，本腳本不負責間隔。
+
 輸出：
 - 若在 GitHub Actions 環境，會寫入 $GITHUB_OUTPUT：should_run=true/false
 - 同時也會印出簡短判斷資訊

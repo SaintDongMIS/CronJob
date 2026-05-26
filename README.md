@@ -26,19 +26,26 @@ TOBIM_DRY_RUN=0 python scripts/tobim_copy_images_gps.py
 
 ### 排程總覽（台北時間 Asia/Taipei）
 
-| 工作流程 | 腳本 | Cron 觸發 | 實際執行業務的時間 |
-|----------|------|-----------|-------------------|
-| `erp-balance-update.yml` | `erp_update_not_in_dingxin.py` | 每 30 分鐘 `*/30 * * * *`（UTC） | 見下方 Gate |
-| `tobim-copy-images-gps.yml` | `tobim_copy_images_gps.py` | 同上 | 見下方 Gate |
-| `health-digest-email.yml` | `workflow_health_email.py` | **每天 10:00、15:00**（UTC 02:00 / 07:00） | 每次都寄信（查 Actions 存活） |
+| 工作流程 | 腳本 | Cron 觸發（UTC） | 工作日業務頻率（約） |
+|----------|------|------------------|----------------------|
+| `erp-balance-update.yml` | `erp_update_not_in_dingxin.py` | `7,37 * * * *`（每 30 分，:07/:37） | 每 **30 分鐘** 一次 |
+| `tobim-copy-images-gps.yml` | `tobim_copy_images_gps.py` | `7 */2 * * *`（每 2 小時，:07） | 每 **2 小時** 一次 |
+| `health-digest-email.yml` | `workflow_health_email.py` | `0 2,7 * * *`（台北 10:00 / 15:00） | 每天都寄信（查 Actions 存活） |
+
+Cron 刻意避開 **:00 / :30** 以降低 GitHub Actions 排程延遲；實際開始時間仍可能漂移數分鐘（平台 best-effort）。
 
 **ERP / ToBim 共同 Gate**（`scripts/should_run.py`）：
 
 - **工作日**：非台灣政府行政機關放假日（含週末、補假）
 - **時段**：**08:30～17:30**（含）
-- 其餘時間 workflow 仍會被 cron 喚起，但只跑 gate、**不執行**更新／複製腳本
+- 其餘時間 workflow 仍可能被 cron 喚起，但只跑 gate、**不執行**更新／複製腳本
 
-在上述時段內，兩支 job 約每 **30 分鐘** 執行一次業務邏輯（例如 08:30、09:00、09:30 … 17:30，每個工作日各約 **19 次**）。ERP 與 ToBim **排程相同、各自獨立 workflow**。
+**通過 Gate 後，業務腳本大約會在（台北）**：
+
+- **ERP**：08:37、09:07、09:37 … 直至 17:37（約 **19～20 次／工作日**）
+- **ToBim**：08:07、10:07、12:07、14:07、16:07（約 **5 次／工作日**；18:07 已超出 17:30 窗）
+
+兩支為 **獨立 workflow**，頻率由各自 cron 決定，假日／下班由 gate 擋住。
 
 **健康檢查 Email**（與業務執行脫鉤）：
 

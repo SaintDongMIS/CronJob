@@ -6,7 +6,8 @@ name: ToBim 環景 — 複製圖片與 GPS
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    # 每 2 小時（UTC 每偶數時 :07，避開整點/半點尖峰）；業務是否執行由 should_run.py 判定
+    - cron: "7 */2 * * *"
 
 env:
   ASSETS_BASE_URL: ${{ vars.ASSETS_BASE_URL || secrets.ASSETS_BASE_URL }}
