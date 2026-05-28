@@ -87,7 +87,12 @@ def main() -> int:
     mode = _resolve_mode()
 
     cal = TaiwanCalendar()
-    is_holiday = bool(cal.is_holiday(now.date()))
+    try:
+        is_holiday = bool(cal.is_holiday(now.date()))
+    except ValueError:
+        # taiwan-holidays 的資料可能尚未包含未來年份；
+        # 若缺資料就退回「週末視為假日」以避免整個排程中斷。
+        is_holiday = now.weekday() >= 5
     time_ok, time_label = _time_allowed(mode, now)
 
     should_run = (not is_holiday) and time_ok
