@@ -8,8 +8,8 @@ name: ERP 借貸平衡 — 更新沒有在鼎新
 on:
   workflow_dispatch:
   schedule:
-    # 每 30 分鐘（UTC :07、:37，避開整點/半點尖峰）；業務是否執行由 should_run.py 判定
-    - cron: "7,37 * * * *"
+    # 每 30 分鐘（UTC :00、:30）；業務是否執行由 should_run.py 判定
+    - cron: "0,30 * * * *"
 
 env:
   ERP_LIST_URL: ${{ vars.ERP_LIST_URL || secrets.ERP_LIST_URL }}
