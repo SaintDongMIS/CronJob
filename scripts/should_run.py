@@ -20,7 +20,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, time
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo  # py>=3.9
+except ModuleNotFoundError:  # pragma: no cover
+    from backports.zoneinfo import ZoneInfo  # py<3.9
 
 from taiwan_holidays.taiwan_calendar import TaiwanCalendar
 
