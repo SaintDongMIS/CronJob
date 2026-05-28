@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, time
 try:
@@ -34,8 +35,12 @@ MODE_OFFHOURS = "offhours"
 BUSINESS_START = time(8, 30)
 BUSINESS_END = time(17, 30)
 
+_DATACLASS_KW = {"frozen": True}
+if sys.version_info >= (3, 10):
+    _DATACLASS_KW["slots"] = True
 
-@dataclass(frozen=True, slots=True)
+
+@dataclass(**_DATACLASS_KW)
 class Window:
     start: time
     end: time
