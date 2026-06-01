@@ -81,3 +81,163 @@ DIGEST_SLOT=morning DIGEST_DRY_RUN=1 python scripts/workflow_health_email.py
 python scripts/workflow_health_email.py
 ```
 
+## Synology NAS（SSH）部署與排程（不依賴 GitHub Actions）
+
+若環境位於內網且不便使用 GitHub Actions，可將專案放到 NAS（例如 `192.168.98.48`）並用 Docker 的 Python 執行腳本，再用 `/etc/cron.d` 排程。
+
+### 目標
+
+- **不依賴 NAS 內建 Python 版本**（常見只有 Python 3.8，會遇到 `zoneinfo`、`dataclass slots` 等相容問題）
+- 每次執行以 `python:3.12-slim` container 跑腳本（跑完即 `--rm`）
+- 排程採用 `/etc/cron.d/cronjob`（可全程 SSH 操作，不開 DSM UI）
+
+### 一次性初始化
+
+1) **Clone 專案到 NAS**
+
+```bash
+cd /volume1/docker
+git clone https://github.com/SaintDongMIS/CronJob.git CronJob
+cd /volume1/docker/CronJob
+```
+
+2) **準備 `.env`**
+
+```bash
+cp .env.example .env
+# 編輯 .env：至少填 ERP_LIST_URL；需要登入就填 ERP_COOKIE；ASSETS_BASE_URL 建議用內網版
+```
+
+> 注意：`.env` 可能含敏感資訊（如 `ERP_COOKIE`），**不要提交到 Git**。
+
+若 NAS 未開 SFTP subsystem（導致 `scp` 失敗），可在 Mac 端用舊協定強制上傳：
+
+```bash
+scp -O /Users/jim/Documents/CronJob/.env jimWu01@192.168.98.48:/volume1/docker/CronJob/.env
+```
+
+3) **確認 Docker 可用**
+
+```bash
+sudo -n /usr/local/bin/docker --version
+```
+
+### 執行腳本（以 Docker 跑 Python 3.12）
+
+#### 建立兩個可重複執行腳本
+
+建立 `/volume1/docker/CronJob/run_erp.sh`：
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+BASE="/volume1/docker/CronJob"
+mkdir -p "$BASE/logs" "$BASE/.lock"
+LOCK="$BASE/.lock/erp.lock"
+LOG="$BASE/logs/erp_$(date +%F).log"
+
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "$(date '+%F %T') [SKIP] ERP locked" >> "$LOG"
+  exit 0
+fi
+trap 'rmdir "$LOCK"' EXIT
+
+echo "$(date '+%F %T') [START] ERP (docker py3.12)" >> "$LOG"
+sudo -n /usr/local/bin/docker run --rm \
+  --env-file "$BASE/.env" \
+  -v "$BASE":/app \
+  -w /app \
+  python:3.12-slim \
+  bash -lc "pip -q install -r requirements.txt && python scripts/should_run.py && python scripts/erp_update_not_in_dingxin.py" >> "$LOG" 2>&1
+echo "$(date '+%F %T') [OK] ERP" >> "$LOG"
+```
+
+建立 `/volume1/docker/CronJob/run_tobim.sh`（上線前可先 `TOBIM_DRY_RUN=1` 觀察）：
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+BASE="/volume1/docker/CronJob"
+mkdir -p "$BASE/logs" "$BASE/.lock"
+LOCK="$BASE/.lock/tobim.lock"
+LOG="$BASE/logs/tobim_$(date +%F).log"
+
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "$(date '+%F %T') [SKIP] ToBim locked" >> "$LOG"
+  exit 0
+fi
+trap 'rmdir "$LOCK"' EXIT
+
+echo "$(date '+%F %T') [START] ToBim (docker py3.12)" >> "$LOG"
+sudo -n /usr/local/bin/docker run --rm \
+  --env-file "$BASE/.env" \
+  -e SHOULD_RUN_MODE=offhours \
+  -e TOBIM_DRY_RUN=1 \
+  -v "$BASE":/app \
+  -w /app \
+  python:3.12-slim \
+  bash -lc "pip -q install -r requirements.txt && python scripts/should_run.py && python scripts/tobim_copy_images_gps.py" >> "$LOG" 2>&1
+echo "$(date '+%F %T') [OK] ToBim" >> "$LOG"
+```
+
+給執行權限：
+
+```bash
+chmod +x /volume1/docker/CronJob/run_erp.sh /volume1/docker/CronJob/run_tobim.sh
+```
+
+手動驗證（會產生 log）：
+
+```bash
+/volume1/docker/CronJob/run_erp.sh
+/volume1/docker/CronJob/run_tobim.sh
+tail -n 120 /volume1/docker/CronJob/logs/erp_$(date +%F).log
+tail -n 120 /volume1/docker/CronJob/logs/tobim_$(date +%F).log
+```
+
+### 設定排程（全程 SSH）
+
+建立 `/etc/cron.d/cronjob`：
+
+```bash
+sudo -n sh -lc 'cat > /etc/cron.d/cronjob <<'"'"'EOF'"'"'
+# CronJob (ERP/ToBim) - run via docker python
+# format: min hour dom mon dow user command
+
+# ERP: every 30 minutes (:00 / :30)
+0,30 * * * * jimWu01 /volume1/docker/CronJob/run_erp.sh
+
+# ToBim: every 2 hours at :00
+0 */2 * * * jimWu01 /volume1/docker/CronJob/run_tobim.sh
+EOF
+chmod 644 /etc/cron.d/cronjob
+synoschedtask --sync
+'
+```
+
+> 修改 `/etc/cron.d/cronjob` 後，建議執行 `sudo -n synoschedtask --sync` 讓排程器同步。
+
+### 日後更新代碼（重點）
+
+1) **更新程式碼**
+
+```bash
+cd /volume1/docker/CronJob
+git pull --ff-only
+```
+
+2) **不需要重設排程**
+
+排程會自動用最新程式碼執行（因為 container 會 mount 專案資料夾）。
+
+3) **若 `requirements.txt` 有更新**
+
+因為每次執行都會在 container 內 `pip install -r requirements.txt`，不需額外手動安裝；但若外網不穩導致安裝變慢，可考慮改成自建 image（把依賴預先烤進 image）以提高穩定性。
+
+4) **log 位置**
+
+- ERP：`/volume1/docker/CronJob/logs/erp_YYYY-MM-DD.log`
+- ToBim：`/volume1/docker/CronJob/logs/tobim_YYYY-MM-DD.log`
+
