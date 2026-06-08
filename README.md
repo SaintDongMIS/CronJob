@@ -20,6 +20,9 @@ python scripts/erp_update_not_in_dingxin.py
 
 # ToBim：本機 .env 設 TOBIM_DRY_RUN=1 即可預覽；正式執行：
 TOBIM_DRY_RUN=0 python scripts/tobim_copy_images_gps.py
+
+# ToBim 診斷掃描（列出待 COPY 巷弄，不呼叫 SSE）：
+python scripts/scan_tobim_all.py
 ```
 
 ## GitHub Actions
@@ -57,7 +60,7 @@ TOBIM_DRY_RUN=0 python scripts/tobim_copy_images_gps.py
 | 早報 | **10:00** | 昨日 15:00 ～ 今日 10:00 |
 | 午報 | **15:00** | 今日 10:00 ～ 15:00 |
 
-一封郵件內含 **ERP + ToBim** 兩段，用 GitHub Actions 執行紀錄判斷排程是否正常（非業務結果彙總）。
+一封郵件內含 **ERP + ToBim** 兩段，用 GitHub Actions 執行紀錄判斷排程是否正常（非業務結果彙總）。若改在 **NAS** 跑 ERP/ToBim，請改用下方 NAS 的 `run_health_email.sh`，可停用本 workflow。
 
 ### Secrets / Variables
 
@@ -105,10 +108,15 @@ cd /volume1/docker/CronJob
 
 ```bash
 cp .env.example .env
-# 編輯 .env：至少填 ERP_LIST_URL；需要登入就填 ERP_COOKIE；ASSETS_BASE_URL 建議用內網版
+# 編輯 .env，至少：
+#   ERP_LIST_URL=...
+#   ASSETS_BASE_URL=http://192.168.98.61:9880   # 環景 API；Docker 內請用內網 IP，勿用 hostname
+#   TOBIM_DRY_RUN=0                               # 正式執行；試跑改 1
+#   SMTP_*、EMAIL_TO=...                          # NAS 健康檢查 Email
 ```
 
-> 注意：`.env` 可能含敏感資訊（如 `ERP_COOKIE`），**不要提交到 Git**。
+> 注意：`.env` 可能含敏感資訊（如 `ERP_COOKIE`），**不要提交到 Git**。  
+> `assets.bim-group.com` 在 NAS 主機上或許能連，但 **Docker container 內常 timeout**；請改內網 IP（例如 `192.168.98.61:9880`）。
 
 若 NAS 未開 SFTP subsystem（導致 `scp` 失敗），可在 Mac 端用舊協定強制上傳：
 
@@ -124,9 +132,15 @@ sudo -n /usr/local/bin/docker --version
 
 ### 執行腳本（以 Docker 跑 Python 3.12）
 
-#### 建立兩個可重複執行腳本
+- **`run_health_email.sh`**：隨 repo 提供（`git clone` / `git pull` 後即有）。
+- **`run_erp.sh`、`run_tobim.sh`**：請依下方範本在 NAS 建立（或對照更新舊版）。
 
-建立 `/volume1/docker/CronJob/run_erp.sh`：
+```bash
+cd /volume1/docker/CronJob
+chmod +x run_erp.sh run_tobim.sh run_health_email.sh
+```
+
+#### 建立 `run_erp.sh`
 
 ```bash
 #!/bin/bash
@@ -153,7 +167,9 @@ sudo -n /usr/local/bin/docker run --rm \
 echo "$(date '+%F %T') [OK] ERP" >> "$LOG"
 ```
 
-建立 `/volume1/docker/CronJob/run_tobim.sh`（上線前可先 `TOBIM_DRY_RUN=1` 觀察）：
+#### 建立 `run_tobim.sh`
+
+`TOBIM_DRY_RUN` 由 **`.env` 控制**（正式 `0`、試跑 `1`）；**不要在 shell 裡再加 `-e TOBIM_DRY_RUN=1`**，否則會覆蓋 `.env`。
 
 ```bash
 #!/bin/bash
@@ -174,7 +190,6 @@ echo "$(date '+%F %T') [START] ToBim (docker py3.12)" >> "$LOG"
 sudo -n /usr/local/bin/docker run --rm \
   --env-file "$BASE/.env" \
   -e SHOULD_RUN_MODE=offhours \
-  -e TOBIM_DRY_RUN=1 \
   -v "$BASE":/app \
   -w /app \
   python:3.12-slim \
@@ -182,11 +197,7 @@ sudo -n /usr/local/bin/docker run --rm \
 echo "$(date '+%F %T') [OK] ToBim" >> "$LOG"
 ```
 
-給執行權限：
-
-```bash
-chmod +x /volume1/docker/CronJob/run_erp.sh /volume1/docker/CronJob/run_tobim.sh
-```
+> **NAS 與 GitHub Actions 的 Gate 差異**：Actions 在 `should_run=false` 時**不執行**業務腳本；NAS 的 `run_*.sh` 使用 `should_run.py && 業務腳本`，而 `should_run.py` **永遠 exit 0**，故 ToBim 在上班時段仍會被 cron 喚起（`should_run` 只會印 `SKIP` 到 log）。若要在 NAS 也嚴格擋住時段，需另改 shell 邏輯。
 
 手動驗證（會產生 log）：
 
@@ -195,36 +206,20 @@ chmod +x /volume1/docker/CronJob/run_erp.sh /volume1/docker/CronJob/run_tobim.sh
 /volume1/docker/CronJob/run_tobim.sh
 tail -n 120 /volume1/docker/CronJob/logs/erp_$(date +%F).log
 tail -n 120 /volume1/docker/CronJob/logs/tobim_$(date +%F).log
+
+# ToBim 診斷掃描（待 COPY 巷弄列表）：
+sudo -n /usr/local/bin/docker run --rm \
+  --env-file /volume1/docker/CronJob/.env \
+  -e NAS_LOG_DIR=/app/logs -v /volume1/docker/CronJob:/app -w /app \
+  python:3.12-slim \
+  bash -lc "pip -q install -r requirements.txt && python scripts/scan_tobim_all.py"
 ```
 
 #### 健康檢查 Email（NAS cron，不依賴 GitHub Actions）
 
-`.env` 需設定 `SMTP_*`、`EMAIL_TO`（與 GitHub 版相同）。建立 `/volume1/docker/CronJob/run_health_email.sh`：
+`.env` 需設定 `SMTP_*`、`EMAIL_TO`。腳本為 repo 內的 `run_health_email.sh`（讀 `logs/erp_*.log`、`logs/tobim_*.log` 的 `[START]`/`[OK]`，非 GitHub API）。
 
 ```bash
-#!/bin/bash
-set -euo pipefail
-
-BASE="/volume1/docker/CronJob"
-SLOT="${1:-morning}"
-LOG="$BASE/logs/health_email_$(date +%F).log"
-
-echo "$(date '+%F %T') [START] health-email slot=$SLOT" >> "$LOG"
-sudo -n /usr/local/bin/docker run --rm \
-  --env-file "$BASE/.env" \
-  -e DIGEST_SLOT="$SLOT" \
-  -e NAS_HOSTNAME="$(hostname)" \
-  -e NAS_LOG_DIR=/app/logs \
-  -v "$BASE":/app \
-  -w /app \
-  python:3.12-slim \
-  bash -lc "pip -q install -r requirements.txt && python scripts/nas_health_email.py" >> "$LOG" 2>&1
-echo "$(date '+%F %T') [OK] health-email" >> "$LOG"
-```
-
-```bash
-chmod +x /volume1/docker/CronJob/run_health_email.sh
-
 # 試寄（不真的發信）
 sudo -n /usr/local/bin/docker run --rm \
   --env-file /volume1/docker/CronJob/.env \
