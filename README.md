@@ -3,7 +3,7 @@
 ## 功能
 
 - **ERP**：定時掃描「檢查自動分錄借貸不平衡」列表頁，篩選「沒有在鼎新」的列，並呼叫 `update_balance_status.asp`（每筆預設間隔 5 秒）。
-- **ToBim 環景**：於**工作日下班後**（台北 17:30 後至翌日 08:30 前；國定假日與週末不執行）掃描 `assets.bim-group.com` 上 ToBim「未完成」案號內各巷弄；若缺少 `.jpg` 與 `.txt` 則呼叫 `/api/copy-images-and-gps-sse`（等同「複製圖片及產生 Img_GPS」按鈕），兩者皆有則跳過。
+- **ToBim 環景**：於**工作日下班後**（台北 17:30 後至翌日 08:30 前；國定假日與週末不執行）掃描環景檔案瀏覽器上 ToBim 各案號內巷弄；若缺少 `.jpg` 與 `.txt` 則呼叫 `/api/copy-images-and-gps-sse`（等同「複製圖片及產生 Img_GPS」按鈕），兩者皆有則跳過。不依案號 `hasStreetView` 過濾；掃描時以案號層子資料夾的 `hasGpsTxt` 略過已完成巷弄，僅對待處理者查內容。
 
 ## 本機執行
 

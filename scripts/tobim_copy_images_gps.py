@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-掃描環景檔案瀏覽器 ToBim「未完成」案號下的各巷弄資料夾：
+掃描環景檔案瀏覽器 ToBim 各案號下的巷弄資料夾：
 若同時缺少 *.jpg 與 *.txt，則呼叫與前端相同的 SSE API 執行「複製圖片及產生 Img_GPS」；
-若兩者皆有則跳過。
+若兩者皆有則跳過。不依案號 hasStreetView 過濾（案號可能已標完成，但巷弄仍待處理）。
+
+掃描策略：每案號只呼叫一次 /api/folder，以子資料夾的 hasGpsTxt 判斷是否已完成；
+僅對 hasGpsTxt=false 的巷弄再查內容（驗證 .csv 等），避免對已完成的大資料夾做重型列舉。
 
 不需模擬瀏覽器；對應前端按鈕：/api/copy-images-and-gps-sse
 
@@ -159,6 +162,7 @@ def iter_subfolder_tasks(
     base_url: str,
     *,
     timeout: float,
+    require_csv: bool = True,
 ) -> Iterator[SubfolderTask]:
     folders_payload = _api_get_json(
         session, base_url, "/api/folders", timeout=timeout
@@ -166,23 +170,46 @@ def iter_subfolder_tasks(
     for top in folders_payload.get("data", []):
         if top.get("mainFolder") != "ToBim":
             continue
-        if top.get("hasStreetView"):
-            continue
         case_id = top.get("name", "")
         top_path = top.get("fullPath", "")
-        for entry in top.get("files", []):
+        case_payload = _api_get_json(
+            session,
+            base_url,
+            f"/api/folder?path={quote(top_path, safe='')}",
+            timeout=timeout,
+        )
+        for entry in case_payload.get("data", []):
             if not entry.get("isDirectory"):
                 continue
             sub_name = entry.get("name", "")
             sub_path = f"{top_path}\\{sub_name}"
-            content_payload = _api_get_json(
-                session,
-                base_url,
-                f"/api/folder?path={quote(sub_path, safe='')}",
-                timeout=timeout,
-            )
-            files = content_payload.get("data", [])
-            has_jpg, has_txt, has_csv = _file_flags(files)
+            if entry.get("hasGpsTxt"):
+                yield SubfolderTask(
+                    case_id=case_id,
+                    subfolder_name=sub_name,
+                    full_path=sub_path,
+                    has_jpg=True,
+                    has_txt=True,
+                    has_csv=True,
+                    file_count=0,
+                )
+                continue
+
+            has_jpg = False
+            has_txt = False
+            has_csv = not require_csv
+            file_count = 0
+            if require_csv:
+                content_payload = _api_get_json(
+                    session,
+                    base_url,
+                    f"/api/folder?path={quote(sub_path, safe='')}",
+                    timeout=timeout,
+                )
+                files = content_payload.get("data", [])
+                has_jpg, has_txt, has_csv = _file_flags(files)
+                file_count = len(files)
+
             yield SubfolderTask(
                 case_id=case_id,
                 subfolder_name=sub_name,
@@ -190,7 +217,7 @@ def iter_subfolder_tasks(
                 has_jpg=has_jpg,
                 has_txt=has_txt,
                 has_csv=has_csv,
-                file_count=len(files),
+                file_count=file_count,
             )
 
 
@@ -265,6 +292,7 @@ def main() -> int:
         session,
         settings.base_url,
         timeout=settings.request_timeout_seconds,
+        require_csv=settings.require_csv,
     ):
         skip, reason = should_skip(task, require_csv=settings.require_csv)
         status = (
