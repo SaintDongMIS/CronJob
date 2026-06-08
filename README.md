@@ -197,6 +197,47 @@ tail -n 120 /volume1/docker/CronJob/logs/erp_$(date +%F).log
 tail -n 120 /volume1/docker/CronJob/logs/tobim_$(date +%F).log
 ```
 
+#### 健康檢查 Email（NAS cron，不依賴 GitHub Actions）
+
+`.env` 需設定 `SMTP_*`、`EMAIL_TO`（與 GitHub 版相同）。建立 `/volume1/docker/CronJob/run_health_email.sh`：
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+BASE="/volume1/docker/CronJob"
+SLOT="${1:-morning}"
+LOG="$BASE/logs/health_email_$(date +%F).log"
+
+echo "$(date '+%F %T') [START] health-email slot=$SLOT" >> "$LOG"
+sudo -n /usr/local/bin/docker run --rm \
+  --env-file "$BASE/.env" \
+  -e DIGEST_SLOT="$SLOT" \
+  -e NAS_HOSTNAME="$(hostname)" \
+  -e NAS_LOG_DIR=/app/logs \
+  -v "$BASE":/app \
+  -w /app \
+  python:3.12-slim \
+  bash -lc "pip -q install -r requirements.txt && python scripts/nas_health_email.py" >> "$LOG" 2>&1
+echo "$(date '+%F %T') [OK] health-email" >> "$LOG"
+```
+
+```bash
+chmod +x /volume1/docker/CronJob/run_health_email.sh
+
+# 試寄（不真的發信）
+sudo -n /usr/local/bin/docker run --rm \
+  --env-file /volume1/docker/CronJob/.env \
+  -e DIGEST_SLOT=morning -e DIGEST_DRY_RUN=1 \
+  -e NAS_LOG_DIR=/app/logs -v /volume1/docker/CronJob:/app -w /app \
+  python:3.12-slim \
+  bash -lc "pip -q install -r requirements.txt && python scripts/nas_health_email.py"
+
+# 正式寄一封
+/volume1/docker/CronJob/run_health_email.sh morning
+tail -n 20 /volume1/docker/CronJob/logs/health_email_$(date +%F).log
+```
+
 ### 設定排程（全程 SSH）
 
 建立 `/etc/cron.d/cronjob`：
@@ -211,6 +252,10 @@ sudo -n sh -lc 'cat > /etc/cron.d/cronjob <<'"'"'EOF'"'"'
 
 # ToBim: every 2 hours at :00
 0 */2 * * * jimWu01 /volume1/docker/CronJob/run_tobim.sh
+
+# Health email: Taipei 10:00 / 15:00
+0 10 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh morning
+0 15 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh afternoon
 EOF
 chmod 644 /etc/cron.d/cronjob
 synoschedtask --sync
@@ -240,4 +285,7 @@ git pull --ff-only
 
 - ERP：`/volume1/docker/CronJob/logs/erp_YYYY-MM-DD.log`
 - ToBim：`/volume1/docker/CronJob/logs/tobim_YYYY-MM-DD.log`
+- 健康檢查 Email：`/volume1/docker/CronJob/logs/health_email_YYYY-MM-DD.log`
+
+> 若 ERP/ToBim 改在 NAS 執行，可停用 GitHub 的 `health-digest-email.yml`；早晚信改由 NAS 的 `run_health_email.sh` 寄出（讀上述 log，非 GitHub Actions API）。
 
