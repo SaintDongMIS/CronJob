@@ -113,6 +113,7 @@ cp .env.example .env
 #   ASSETS_BASE_URL=http://192.168.98.61:9880   # 環景 API；Docker 內請用內網 IP，勿用 hostname
 #   TOBIM_DRY_RUN=0                               # 正式執行；試跑改 1
 #   SMTP_*、EMAIL_TO=...                          # NAS 健康檢查 Email
+#   TELEGRAM_BOT_TOKEN=...、TELEGRAM_CHAT_ID=...  # NAS Telegram 輪詢
 ```
 
 > 注意：`.env` 可能含敏感資訊（如 `ERP_COOKIE`），**不要提交到 Git**。  
@@ -132,12 +133,12 @@ sudo -n /usr/local/bin/docker --version
 
 ### 執行腳本（以 Docker 跑 Python 3.12）
 
-- **`run_health_email.sh`**：隨 repo 提供（`git clone` / `git pull` 後即有）。
+- **`run_health_email.sh`、`run_health_check.sh`**：隨 repo 提供（`git clone` / `git pull` 後即有）。
 - **`run_erp.sh`、`run_tobim.sh`**：請依下方範本在 NAS 建立（或對照更新舊版）。
 
 ```bash
 cd /volume1/docker/CronJob
-chmod +x run_erp.sh run_tobim.sh run_health_email.sh
+chmod +x run_erp.sh run_tobim.sh run_health_email.sh run_health_check.sh
 ```
 
 #### 建立 `run_erp.sh`
@@ -215,12 +216,32 @@ sudo -n /usr/local/bin/docker run --rm \
   bash -lc "pip -q install -r requirements.txt && python scripts/scan_tobim_all.py"
 ```
 
-#### 健康檢查 Email（NAS cron，不依賴 GitHub Actions）
+#### 健康檢查（NAS cron，不依賴 GitHub Actions）
 
-`.env` 需設定 `SMTP_*`、`EMAIL_TO`。腳本為 repo 內的 `run_health_email.sh`（讀 `logs/erp_*.log`、`logs/tobim_*.log` 的 `[START]`/`[OK]`，非 GitHub API）。
+讀 `logs/erp_*.log`、`logs/tobim_*.log` 的 `[START]`/`[OK]`（非 GitHub API、非業務明細）。
+
+| 通道 | 腳本 | 節奏 | 說明 |
+|------|------|------|------|
+| **Email** | `run_health_email.sh` | 10:05 / 15:05 | 早晚摘要（需 `SMTP_*`、`EMAIL_TO`） |
+| **Telegram** | `run_health_check.sh` | 平日每 2h | 即時通知（需 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`） |
+
+`.env` 範例（Telegram 相關）：
 
 ```bash
-# 試寄（不真的發信）
+TELEGRAM_BOT_TOKEN=123456:ABC...
+TELEGRAM_CHAT_ID=你的chat_id
+HEALTH_NOTIFY_OK=0        # 0=僅 warn/fail 發送；1=全綠也發
+HEALTH_SKIP_HOLIDAY=1     # 放假日不發 Telegram
+HEALTH_GRACE_MIN=5        # START 後 N 分鐘內不計異常（避免 10:00 誤報）
+HEALTH_WINDOW_HOURS=2     # Telegram 統計過去 N 小時
+```
+
+Telegram 會依 job 預期執行窗判斷：ERP 工作日 08:30–17:30；ToBim 工作日 17:30 後～翌日 08:30 前。非執行窗顯示 ⏭ 略過。異常時會附 log 錯誤摘要，不必 SSH 查檔。
+
+```bash
+chmod +x run_health_email.sh run_health_check.sh
+
+# Email 試寄（不真的發信）
 sudo -n /usr/local/bin/docker run --rm \
   --env-file /volume1/docker/CronJob/.env \
   -e DIGEST_SLOT=morning -e DIGEST_DRY_RUN=1 \
@@ -228,9 +249,20 @@ sudo -n /usr/local/bin/docker run --rm \
   python:3.12-slim \
   bash -lc "pip -q install -r requirements.txt && python scripts/nas_health_email.py"
 
-# 正式寄一封
+# Telegram 試跑（不真的發送）
+sudo -n /usr/local/bin/docker run --rm \
+  --env-file /volume1/docker/CronJob/.env \
+  -e DIGEST_DRY_RUN=1 -e HEALTH_NOTIFY_OK=1 \
+  -e NAS_HOSTNAME="$(hostname)" -e NAS_LOG_DIR=/app/logs \
+  -v /volume1/docker/CronJob:/app -w /app \
+  python:3.12-slim \
+  bash -lc "pip -q install -r requirements.txt && python scripts/nas_health_check.py"
+
+# 正式寄 Email / 發 Telegram
 /volume1/docker/CronJob/run_health_email.sh morning
+/volume1/docker/CronJob/run_health_check.sh
 tail -n 20 /volume1/docker/CronJob/logs/health_email_$(date +%F).log
+tail -n 10 /volume1/docker/CronJob/logs/health_check_$(date +%F).log
 ```
 
 ### 設定排程（全程 SSH）
@@ -248,9 +280,14 @@ sudo -n sh -lc 'cat > /etc/cron.d/cronjob <<'"'"'EOF'"'"'
 # ToBim: every 2 hours at :00
 0 */2 * * * jimWu01 /volume1/docker/CronJob/run_tobim.sh
 
-# Health email: Taipei 10:00 / 15:00
-0 10 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh morning
-0 15 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh afternoon
+# Health email: Taipei 10:05 / 15:05（:05 避開與業務同秒啟動誤報）
+5 10 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh morning
+5 15 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh afternoon
+
+# Telegram health: weekdays 08–17 every 2h（ERP 監控）
+5 8,10,12,14,16 * * 1-5 jimWu01 /volume1/docker/CronJob/run_health_check.sh
+# Telegram health: weekdays 18–06 every 2h（ToBim 監控）
+5 18,20,22,0,2,4,6 * * 1-5 jimWu01 /volume1/docker/CronJob/run_health_check.sh
 EOF
 chmod 644 /etc/cron.d/cronjob
 synoschedtask --sync
@@ -281,6 +318,7 @@ git pull --ff-only
 - ERP：`/volume1/docker/CronJob/logs/erp_YYYY-MM-DD.log`
 - ToBim：`/volume1/docker/CronJob/logs/tobim_YYYY-MM-DD.log`
 - 健康檢查 Email：`/volume1/docker/CronJob/logs/health_email_YYYY-MM-DD.log`
+- 健康檢查 Telegram：`/volume1/docker/CronJob/logs/health_check_YYYY-MM-DD.log`
 
-> 若 ERP/ToBim 改在 NAS 執行，可停用 GitHub 的 `health-digest-email.yml`；早晚信改由 NAS 的 `run_health_email.sh` 寄出（讀上述 log，非 GitHub Actions API）。
+> 若 ERP/ToBim 改在 NAS 執行，可停用 GitHub 的 `health-digest-email.yml`；改由 NAS 的 `run_health_email.sh`（早晚摘要）與 `run_health_check.sh`（Telegram 輪詢）監控。
 
