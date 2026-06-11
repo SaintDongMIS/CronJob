@@ -238,6 +238,8 @@ HEALTH_WINDOW_HOURS=2     # Telegram 統計過去 N 小時
 
 Telegram 會依 job 預期執行窗判斷：ERP 工作日 08:30–17:30；ToBim 工作日 17:30 後～翌日 08:30 前。非執行窗顯示 ⏭ 略過。異常時會附 log 錯誤摘要，不必 SSH 查檔。
 
+ToBim 執行前會以短逾時（預設 5 秒）探測 `ASSETS_BASE_URL`：連不上則優雅略過（log 印 `SKIP  API 無法連線`），健康檢查顯示 🟡 而非 🔴。長期暫停可設 `TOBIM_PAUSED=1`（顯示 ⏭ 手動暫停）。
+
 ```bash
 chmod +x run_health_email.sh run_health_check.sh
 

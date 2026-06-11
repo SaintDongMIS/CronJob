@@ -26,6 +26,8 @@ from tobim_copy_images_gps import (  # noqa: E402
     _DEFAULT_BASE_URL,
     _require_csv_from_env,
     iter_subfolder_tasks,
+    load_settings,
+    preflight_or_exit,
     should_skip,
 )
 
@@ -48,12 +50,16 @@ def main() -> int:
         print(f"（忽略 --folders {args.folders}，改為即時 API 掃描）")
 
     load_dotenv(_project_root() / ".env", override=False)
-    base_url = (os.environ.get(ENV_BASE_URL, "").strip() or _DEFAULT_BASE_URL).rstrip(
-        "/"
-    )
-    require_csv = _require_csv_from_env()
+    settings = load_settings()
+    require_csv = settings.require_csv
 
     session = requests.Session()
+    session.headers.update({"User-Agent": settings.user_agent})
+    early_exit = preflight_or_exit(settings, session)
+    if early_exit is not None:
+        return early_exit
+
+    base_url = settings.base_url
     need_copy: list[tuple[str, str, bool, bool]] = []
     skipped = 0
 

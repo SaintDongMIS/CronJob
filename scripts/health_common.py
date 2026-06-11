@@ -32,6 +32,8 @@ _LINE_TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 _START = re.compile(r"\[START\]")
 _OK = re.compile(r"\[OK\]")
 _LOCKED = re.compile(r"\[SKIP\].*locked", re.IGNORECASE)
+_API_SKIP = re.compile(r"SKIP\s+API 無法連線")
+_PAUSED_SKIP = re.compile(r"SKIP\s+已暫停")
 _EXCEPTION_LINE = re.compile(
     r"^(\w[\w.]*Error|ConnectTimeout|TimeoutError|MaxRetryError):"
 )
@@ -50,6 +52,8 @@ class LogRunStats:
     oks: int = 0
     locked: int = 0
     tracebacks: int = 0
+    api_skips: int = 0
+    paused_skips: int = 0
     last_event_at: datetime | None = None
     last_event_label: str | None = None
 
@@ -185,49 +189,86 @@ def parse_log_window(path: Path, since: datetime, until: datetime) -> LogRunStat
     if not path.is_file():
         return stats
 
+    active_run_in_window = False
     for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw_line.strip()
         if not line:
             continue
         ts = _parse_line_time(line)
-        if ts is None or ts < since or ts > until:
+        if ts is not None and since <= ts <= until:
+            if _START.search(line):
+                active_run_in_window = True
+                stats = LogRunStats(
+                    starts=stats.starts + 1,
+                    oks=stats.oks,
+                    locked=stats.locked,
+                    tracebacks=stats.tracebacks,
+                    api_skips=stats.api_skips,
+                    paused_skips=stats.paused_skips,
+                    last_event_at=ts,
+                    last_event_label="START",
+                )
+            elif _OK.search(line):
+                active_run_in_window = False
+                stats = LogRunStats(
+                    starts=stats.starts,
+                    oks=stats.oks + 1,
+                    locked=stats.locked,
+                    tracebacks=stats.tracebacks,
+                    api_skips=stats.api_skips,
+                    paused_skips=stats.paused_skips,
+                    last_event_at=ts,
+                    last_event_label="OK",
+                )
+            elif _LOCKED.search(line):
+                active_run_in_window = False
+                stats = LogRunStats(
+                    starts=stats.starts,
+                    oks=stats.oks,
+                    locked=stats.locked + 1,
+                    tracebacks=stats.tracebacks,
+                    api_skips=stats.api_skips,
+                    paused_skips=stats.paused_skips,
+                    last_event_at=ts,
+                    last_event_label="LOCKED",
+                )
             continue
 
-        if _START.search(line):
-            stats = LogRunStats(
-                starts=stats.starts + 1,
-                oks=stats.oks,
-                locked=stats.locked,
-                tracebacks=stats.tracebacks,
-                last_event_at=ts,
-                last_event_label="START",
-            )
-        elif _OK.search(line):
-            stats = LogRunStats(
-                starts=stats.starts,
-                oks=stats.oks + 1,
-                locked=stats.locked,
-                tracebacks=stats.tracebacks,
-                last_event_at=ts,
-                last_event_label="OK",
-            )
-        elif _LOCKED.search(line):
-            stats = LogRunStats(
-                starts=stats.starts,
-                oks=stats.oks,
-                locked=stats.locked + 1,
-                tracebacks=stats.tracebacks,
-                last_event_at=ts,
-                last_event_label="LOCKED",
-            )
-        elif line.startswith("Traceback (most recent call last):"):
+        if not active_run_in_window:
+            continue
+
+        if line.startswith("Traceback (most recent call last):"):
             stats = LogRunStats(
                 starts=stats.starts,
                 oks=stats.oks,
                 locked=stats.locked,
                 tracebacks=stats.tracebacks + 1,
-                last_event_at=ts,
+                api_skips=stats.api_skips,
+                paused_skips=stats.paused_skips,
+                last_event_at=stats.last_event_at,
                 last_event_label="FAIL",
+            )
+        elif _API_SKIP.search(line):
+            stats = LogRunStats(
+                starts=stats.starts,
+                oks=stats.oks,
+                locked=stats.locked,
+                tracebacks=stats.tracebacks,
+                api_skips=stats.api_skips + 1,
+                paused_skips=stats.paused_skips,
+                last_event_at=stats.last_event_at,
+                last_event_label=stats.last_event_label,
+            )
+        elif _PAUSED_SKIP.search(line):
+            stats = LogRunStats(
+                starts=stats.starts,
+                oks=stats.oks,
+                locked=stats.locked,
+                tracebacks=stats.tracebacks,
+                api_skips=stats.api_skips,
+                paused_skips=stats.paused_skips + 1,
+                last_event_at=stats.last_event_at,
+                last_event_label=stats.last_event_label,
             )
 
     return stats
@@ -246,6 +287,8 @@ def merge_stats(items: list[LogRunStats]) -> LogRunStats:
             oks=merged.oks + item.oks,
             locked=merged.locked + item.locked,
             tracebacks=merged.tracebacks + item.tracebacks,
+            api_skips=merged.api_skips + item.api_skips,
+            paused_skips=merged.paused_skips + item.paused_skips,
             last_event_at=last_at,
             last_event_label=last_label,
         )
@@ -254,6 +297,8 @@ def merge_stats(items: list[LogRunStats]) -> LogRunStats:
 
 def _hint_for_line(line: str) -> str | None:
     lower = line.lower()
+    if "skip  api 無法連線" in lower:
+        return "環景 API 離線，腳本已略過；請確認主機與 9880 服務是否啟動"
     if "connecttimeout" in lower or "timed out" in lower:
         return "Docker 可能連不到 API，請確認 .env 的 ASSETS_BASE_URL 是否為內網 IP"
     if "dry_run=true" in lower or "dry_run：未呼叫" in lower:
@@ -366,6 +411,22 @@ def evaluate_job(
         status, note = "warn", "時段內無 [START]"
     elif period_fail > 0:
         status, note = "fail", f"異常 {period_fail} 次"
+    elif (
+        stats.paused_skips > 0
+        and unfinished == 0
+        and stats.tracebacks == 0
+    ):
+        status, note = "skip", "手動暫停（TOBIM_PAUSED=1）"
+        failure_snippet = None
+        suggestion = None
+    elif (
+        stats.api_skips > 0
+        and unfinished == 0
+        and stats.tracebacks == 0
+    ):
+        status, note = "warn", "API 無法連線，已略過"
+        failure_snippet = None
+        suggestion = "環景 API 離線，腳本已略過；請確認主機與 9880 服務是否啟動"
     elif stats.locked > 0 and stats.oks == 0:
         status, note = "warn", f"僅見 locked {stats.locked} 次"
     else:

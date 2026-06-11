@@ -29,6 +29,8 @@ from dotenv import load_dotenv
 ENV_BASE_URL = "ASSETS_BASE_URL"
 ENV_DELAY_SEC = "TOBIM_DELAY_SEC"
 ENV_DRY_RUN = "TOBIM_DRY_RUN"
+ENV_PAUSED = "TOBIM_PAUSED"
+ENV_PROBE_TIMEOUT_SEC = "TOBIM_PROBE_TIMEOUT_SEC"
 ENV_REQUIRE_CSV = "TOBIM_REQUIRE_CSV"
 ENV_REQUEST_TIMEOUT_SEC = "TOBIM_REQUEST_TIMEOUT_SEC"
 ENV_SSE_TIMEOUT_SEC = "TOBIM_SSE_TIMEOUT_SEC"
@@ -36,9 +38,14 @@ ENV_USER_AGENT = "TOBIM_USER_AGENT"
 
 _DEFAULT_BASE_URL = "http://assets.bim-group.com:9880"
 _DEFAULT_DELAY_SEC = 2.0
+_DEFAULT_PROBE_TIMEOUT_SEC = 5.0
 _DEFAULT_REQUEST_TIMEOUT_SEC = 120.0
 _DEFAULT_SSE_TIMEOUT_SEC = 3600.0
 _DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; ToBim-Copy-Gps/1.0)"
+
+# 健康檢查會辨識這兩行（勿改格式）
+LOG_API_SKIP_PREFIX = "SKIP  API 無法連線"
+LOG_PAUSED_PREFIX = "SKIP  已暫停"
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +128,42 @@ def load_settings() -> Settings:
         ),
         user_agent=_str_env(ENV_USER_AGENT, default=_DEFAULT_USER_AGENT),
     )
+
+
+def probe_timeout_seconds() -> float:
+    return _float_env(ENV_PROBE_TIMEOUT_SEC, default=_DEFAULT_PROBE_TIMEOUT_SEC)
+
+
+def probe_api_reachable(
+    session: requests.Session,
+    base_url: str,
+    *,
+    timeout: float,
+) -> bool:
+    """短逾時探測 /api/folders；連不上時不進入 120s 掃描。"""
+    try:
+        url = urljoin(f"{base_url}/", "/api/folders")
+        response = session.get(url, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        return bool(payload.get("success"))
+    except (requests.RequestException, ValueError, TypeError):
+        return False
+
+
+def preflight_or_exit(settings: Settings, session: requests.Session) -> int | None:
+    """若應提早結束回傳 exit code，否則回傳 None 繼續掃描。"""
+    if _truthy_env(ENV_PAUSED):
+        print(f"{LOG_PAUSED_PREFIX}（TOBIM_PAUSED=1）")
+        return 0
+    if not probe_api_reachable(
+        session,
+        settings.base_url,
+        timeout=probe_timeout_seconds(),
+    ):
+        print(f"{LOG_API_SKIP_PREFIX} ({settings.base_url})")
+        return 0
+    return None
 
 
 def _file_flags(files: list[dict[str, Any]]) -> tuple[bool, bool, bool]:
@@ -282,6 +325,10 @@ def main() -> int:
         f"DRY_RUN={settings.dry_run}  REQUIRE_CSV={settings.require_csv}  "
         f"DELAY={settings.delay_seconds}s"
     )
+
+    early_exit = preflight_or_exit(settings, session)
+    if early_exit is not None:
+        return early_exit
 
     skipped = 0
     copied = 0
