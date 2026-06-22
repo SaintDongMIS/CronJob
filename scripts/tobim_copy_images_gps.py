@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -68,6 +69,22 @@ class SubfolderTask:
     has_txt: bool
     has_csv: bool
     file_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class CopySseResult:
+    """SSE 複製結果；images/gps 可能來自 complete JSON 或 progress 估算。"""
+
+    saw_progress: bool
+    progress_steps: int
+    images: int | None
+    gps: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedCopy:
+    jpg_count: int
+    has_gps_txt: bool
 
 
 def _project_root() -> Path:
@@ -273,15 +290,88 @@ def should_skip(task: SubfolderTask, *, require_csv: bool) -> tuple[bool, str]:
 
 
 def _parse_sse_payload(payload: str) -> dict[str, Any] | None:
-    """解析 SSE data 行；partial 事件若 JSON 過大解析失敗則略過。"""
+    """解析 SSE data 行；complete 若 JSON 過大解析失敗仍標記為 complete。"""
     try:
         return json.loads(payload)
     except json.JSONDecodeError:
         if '"type":"complete"' in payload or '"type": "complete"' in payload:
-            return {"type": "complete"}
+            return {"type": "complete", "_raw": payload}
         if '"type":"error"' in payload or '"type": "error"' in payload:
             return {"type": "error", "message": "SSE 回傳錯誤（JSON 無法完整解析）"}
         return None
+
+
+def _copied_counts_from_raw(payload: str) -> tuple[int | None, int | None]:
+    """從過大的 complete 行估算 copiedImages / gpsEntries 數量。"""
+    images: int | None = None
+    gps: int | None = None
+    for key, target in (("copiedImages", "images"), ("gpsEntries", "gps")):
+        pattern = rf'"{key}"\s*:\s*\['
+        match = re.search(pattern, payload)
+        if not match:
+            continue
+        start = match.end()
+        depth = 1
+        end = start
+        while end < len(payload) and depth > 0:
+            char = payload[end]
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+            end += 1
+        chunk = payload[start : end - 1] if depth == 0 else payload[start:]
+        count = len(re.findall(r'"(?:[^"\\]|\\.)*"', chunk))
+        if target == "images":
+            images = count
+        else:
+            gps = count
+    return images, gps
+
+
+def _counts_from_complete(data: dict[str, Any]) -> tuple[int | None, int | None]:
+    copied = data.get("copiedImages")
+    gps_entries = data.get("gpsEntries")
+    images = len(copied) if isinstance(copied, list) else None
+    gps = len(gps_entries) if isinstance(gps_entries, list) else None
+    if images is None or gps is None:
+        raw = data.get("_raw")
+        if isinstance(raw, str):
+            raw_images, raw_gps = _copied_counts_from_raw(raw)
+            if images is None:
+                images = raw_images
+            if gps is None:
+                gps = raw_gps
+    return images, gps
+
+
+def verify_alley_copied(
+    session: requests.Session,
+    base_url: str,
+    folder_path: str,
+    *,
+    timeout: float,
+) -> VerifiedCopy:
+    """COPY 後以 /api/folder 驗證是否出現 .jpg 與 GPS txt。"""
+    content_payload = _api_get_json(
+        session,
+        base_url,
+        f"/api/folder?path={quote(folder_path, safe='')}",
+        timeout=timeout,
+    )
+    files = content_payload.get("data", [])
+    has_jpg, has_txt, _ = _file_flags(files)
+    jpg_count = sum(
+        1
+        for item in files
+        if not item.get("isDirectory")
+        and item.get("name", "").lower().endswith(".jpg")
+    )
+    if not has_jpg or not has_txt:
+        raise RuntimeError(
+            f"複製後驗證失敗（jpg={jpg_count} txt={'Y' if has_txt else 'N'}）"
+        )
+    return VerifiedCopy(jpg_count=jpg_count, has_gps_txt=has_txt)
 
 
 def run_copy_sse(
@@ -290,29 +380,48 @@ def run_copy_sse(
     folder_path: str,
     *,
     sse_timeout: float,
-) -> dict[str, Any]:
+) -> CopySseResult:
     url = urljoin(
         f"{base_url}/",
         f"/api/copy-images-and-gps-sse?path={quote(folder_path, safe='')}",
     )
     complete: dict[str, Any] | None = None
+    saw_progress = False
+    progress_steps = 0
     with session.get(url, stream=True, timeout=(30.0, sse_timeout)) as response:
         response.raise_for_status()
         for raw_line in response.iter_lines(decode_unicode=True):
             if not raw_line or not raw_line.startswith("data: "):
                 continue
-            data = _parse_sse_payload(raw_line[6:])
+            raw_payload = raw_line[6:]
+            data = _parse_sse_payload(raw_payload)
             if not data:
                 continue
             event_type = data.get("type")
+            if event_type == "progress":
+                saw_progress = True
+                progress_steps += 1
+                continue
             if event_type == "error":
                 raise RuntimeError(data.get("message") or data.get("error") or "SSE 錯誤")
             if event_type == "complete":
+                if not saw_progress:
+                    raise RuntimeError(
+                        "SSE complete 但未見 progress 事件（可能未實際複製）"
+                    )
+                if "_raw" not in data:
+                    data = {**data, "_raw": raw_payload}
                 complete = data
                 break
     if complete is None:
         raise RuntimeError("SSE 連線結束但未收到 complete 事件")
-    return complete
+    images, gps = _counts_from_complete(complete)
+    return CopySseResult(
+        saw_progress=saw_progress,
+        progress_steps=progress_steps,
+        images=images,
+        gps=gps,
+    )
 
 
 def main() -> int:
@@ -369,18 +478,30 @@ def main() -> int:
         if index > 0 and settings.delay_seconds > 0:
             time.sleep(settings.delay_seconds)
         try:
-            result = run_copy_sse(
+            sse_result = run_copy_sse(
                 session,
                 settings.base_url,
                 task.full_path,
                 sse_timeout=settings.sse_timeout_seconds,
             )
+            verified = verify_alley_copied(
+                session,
+                settings.base_url,
+                task.full_path,
+                timeout=settings.request_timeout_seconds,
+            )
             copied += 1
-            copied_images = result.get("copiedImages") or []
-            gps_entries = result.get("gpsEntries") or []
+            image_count = verified.jpg_count
+            if sse_result.images is not None and sse_result.images > 0:
+                image_count = sse_result.images
+            gps_display = (
+                sse_result.gps
+                if sse_result.gps is not None
+                else (1 if verified.has_gps_txt else 0)
+            )
             print(
                 f"OK    {task.case_id}/{task.subfolder_name}  "
-                f"images={len(copied_images)} gps={len(gps_entries)}"
+                f"images={image_count} gps={gps_display} verified"
             )
         except Exception as exc:  # noqa: BLE001 — 記錄後繼續下一筆
             failed += 1
