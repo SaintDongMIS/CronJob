@@ -133,8 +133,8 @@ sudo -n /usr/local/bin/docker --version
 
 ### 執行腳本（以 Docker 跑 Python 3.12）
 
-- **`run_health_email.sh`、`run_health_check.sh`**：隨 repo 提供（`git clone` / `git pull` 後即有）。
-- **`run_erp.sh`、`run_tobim.sh`**：請依下方範本在 NAS 建立（或對照更新舊版）。
+- **`run_health_email.sh`、`run_health_check.sh`、`run_tobim.sh`**：隨 repo 提供（`git clone` / `git pull` 後即有）。
+- **`run_erp.sh`**：請依下方範本在 NAS 建立（或對照更新舊版）。
 
 ```bash
 cd /volume1/docker/CronJob
@@ -168,37 +168,13 @@ sudo -n /usr/local/bin/docker run --rm \
 echo "$(date '+%F %T') [OK] ERP" >> "$LOG"
 ```
 
-#### 建立 `run_tobim.sh`
+#### `run_tobim.sh`（隨 repo 提供）
 
-`TOBIM_DRY_RUN` 由 **`.env` 控制**（正式 `0`、試跑 `1`）；**不要在 shell 裡再加 `-e TOBIM_DRY_RUN=1`**，否則會覆蓋 `.env`。
+`TOBIM_DRY_RUN` 由 **`.env` 控制**（正式 `0`、試跑 `1`）。預設每輪最多 COPY **10** 巷（`TOBIM_MAX_COPY_PER_RUN`）、巷間隔 **5** 秒（`TOBIM_DELAY_SEC`）。
 
-```bash
-#!/bin/bash
-set -euo pipefail
+NAS 版已設 `SHOULD_RUN_STRICT=1`：上班時段 `should_run.py` 印 `SKIP` 並 **exit 1**，不進入業務腳本（與 GitHub Actions 一致）。
 
-BASE="/volume1/docker/CronJob"
-mkdir -p "$BASE/logs" "$BASE/.lock"
-LOCK="$BASE/.lock/tobim.lock"
-LOG="$BASE/logs/tobim_$(date +%F).log"
-
-if ! mkdir "$LOCK" 2>/dev/null; then
-  echo "$(date '+%F %T') [SKIP] ToBim locked" >> "$LOG"
-  exit 0
-fi
-trap 'rmdir "$LOCK"' EXIT
-
-echo "$(date '+%F %T') [START] ToBim (docker py3.12)" >> "$LOG"
-sudo -n /usr/local/bin/docker run --rm \
-  --env-file "$BASE/.env" \
-  -e SHOULD_RUN_MODE=offhours \
-  -v "$BASE":/app \
-  -w /app \
-  python:3.12-slim \
-  bash -lc "pip -q install -r requirements.txt && python scripts/should_run.py && python scripts/tobim_copy_images_gps.py" >> "$LOG" 2>&1
-echo "$(date '+%F %T') [OK] ToBim" >> "$LOG"
-```
-
-> **NAS 與 GitHub Actions 的 Gate 差異**：Actions 在 `should_run=false` 時**不執行**業務腳本；NAS 的 `run_*.sh` 使用 `should_run.py && 業務腳本`，而 `should_run.py` **永遠 exit 0**，故 ToBim 在上班時段仍會被 cron 喚起（`should_run` 只會印 `SKIP` 到 log）。若要在 NAS 也嚴格擋住時段，需另改 shell 邏輯。
+若 NAS 上仍是舊版手寫腳本，請 `git pull` 後覆蓋或補上 `-e SHOULD_RUN_STRICT=1`。
 
 手動驗證（會產生 log）：
 

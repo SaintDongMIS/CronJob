@@ -35,10 +35,12 @@ ENV_PROBE_TIMEOUT_SEC = "TOBIM_PROBE_TIMEOUT_SEC"
 ENV_REQUIRE_CSV = "TOBIM_REQUIRE_CSV"
 ENV_REQUEST_TIMEOUT_SEC = "TOBIM_REQUEST_TIMEOUT_SEC"
 ENV_SSE_TIMEOUT_SEC = "TOBIM_SSE_TIMEOUT_SEC"
+ENV_MAX_COPY_PER_RUN = "TOBIM_MAX_COPY_PER_RUN"
 ENV_USER_AGENT = "TOBIM_USER_AGENT"
 
 _DEFAULT_BASE_URL = "http://assets.bim-group.com:9880"
-_DEFAULT_DELAY_SEC = 2.0
+_DEFAULT_DELAY_SEC = 5.0
+_DEFAULT_MAX_COPY_PER_RUN = 10
 _DEFAULT_PROBE_TIMEOUT_SEC = 5.0
 _DEFAULT_REQUEST_TIMEOUT_SEC = 120.0
 _DEFAULT_SSE_TIMEOUT_SEC = 3600.0
@@ -57,6 +59,7 @@ class Settings:
     require_csv: bool
     request_timeout_seconds: float
     sse_timeout_seconds: float
+    max_copy_per_run: int
     user_agent: str
 
 
@@ -102,6 +105,16 @@ def _truthy_env(name: str) -> bool:
     return value in ("1", "true", "yes", "on")
 
 
+def _int_env(name: str, *, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return max(0, default)
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return max(0, default)
+
+
 def _float_env(name: str, *, default: float) -> float:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -142,6 +155,9 @@ def load_settings() -> Settings:
         ),
         sse_timeout_seconds=_float_env(
             ENV_SSE_TIMEOUT_SEC, default=_DEFAULT_SSE_TIMEOUT_SEC
+        ),
+        max_copy_per_run=_int_env(
+            ENV_MAX_COPY_PER_RUN, default=_DEFAULT_MAX_COPY_PER_RUN
         ),
         user_agent=_str_env(ENV_USER_AGENT, default=_DEFAULT_USER_AGENT),
     )
@@ -430,9 +446,14 @@ def main() -> int:
     session.headers.update({"User-Agent": settings.user_agent})
 
     print(f"BASE_URL {settings.base_url}")
+    max_copy_label = (
+        str(settings.max_copy_per_run)
+        if settings.max_copy_per_run > 0
+        else "unlimited"
+    )
     print(
         f"DRY_RUN={settings.dry_run}  REQUIRE_CSV={settings.require_csv}  "
-        f"DELAY={settings.delay_seconds}s"
+        f"DELAY={settings.delay_seconds}s  MAX_COPY={max_copy_label}"
     )
 
     early_exit = preflight_or_exit(settings, session)
@@ -464,10 +485,21 @@ def main() -> int:
             continue
 
         pending_copy.append(task)
-        print(f"COPY  {label}  {task.full_path}  {status}")
+
+    total_pending = len(pending_copy)
+    deferred = 0
+    if settings.max_copy_per_run > 0 and total_pending > settings.max_copy_per_run:
+        deferred = total_pending - settings.max_copy_per_run
+        for task in pending_copy[settings.max_copy_per_run :]:
+            print(
+                f"DEFER {task.case_id}/{task.subfolder_name}  "
+                f"(本輪上限 {settings.max_copy_per_run})"
+            )
+        pending_copy = pending_copy[: settings.max_copy_per_run]
 
     print(
-        f"\n掃描完成：略過 {skipped}，待處理 {len(pending_copy)}"
+        f"\n掃描完成：略過 {skipped}，待處理 {total_pending}"
+        + (f"，本輪 COPY {len(pending_copy)}，延後 {deferred}" if deferred else "")
     )
 
     if settings.dry_run:
@@ -475,6 +507,14 @@ def main() -> int:
         return 0
 
     for index, task in enumerate(pending_copy):
+        label = f"{task.case_id}/{task.subfolder_name}"
+        status = (
+            f"jpg={'Y' if task.has_jpg else 'N'} "
+            f"txt={'Y' if task.has_txt else 'N'} "
+            f"csv={'Y' if task.has_csv else 'N'} "
+            f"files={task.file_count}"
+        )
+        print(f"COPY  {label}  {task.full_path}  {status}")
         if index > 0 and settings.delay_seconds > 0:
             time.sleep(settings.delay_seconds)
         try:
@@ -491,17 +531,10 @@ def main() -> int:
                 timeout=settings.request_timeout_seconds,
             )
             copied += 1
-            image_count = verified.jpg_count
-            if sse_result.images is not None and sse_result.images > 0:
-                image_count = sse_result.images
-            gps_display = (
-                sse_result.gps
-                if sse_result.gps is not None
-                else (1 if verified.has_gps_txt else 0)
-            )
             print(
                 f"OK    {task.case_id}/{task.subfolder_name}  "
-                f"images={image_count} gps={gps_display} verified"
+                f"images={verified.jpg_count} "
+                f"progress={sse_result.progress_steps} verified"
             )
         except Exception as exc:  # noqa: BLE001 — 記錄後繼續下一筆
             failed += 1

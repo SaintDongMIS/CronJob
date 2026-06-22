@@ -29,6 +29,7 @@ except ModuleNotFoundError:  # pragma: no cover
 from taiwan_holidays.taiwan_calendar import TaiwanCalendar
 
 ENV_SHOULD_RUN_MODE = "SHOULD_RUN_MODE"
+ENV_SHOULD_RUN_STRICT = "SHOULD_RUN_STRICT"
 MODE_DAY = "day"
 MODE_OFFHOURS = "offhours"
 
@@ -104,6 +105,14 @@ def main() -> int:
         f"({day_type}, {time_label})"
     )
 
+    strict = os.environ.get(ENV_SHOULD_RUN_STRICT, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if strict and not should_run:
+        return 1
     return 0
 
 
