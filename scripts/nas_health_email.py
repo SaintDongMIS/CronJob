@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-NAS 排程健康檢查 Email：讀取 logs/erp_*.log、logs/tobim_*.log，彙整 cron 執行狀態後寄信。
+NAS 排程健康檢查 Email：讀取 logs/erp_*.log、logs/tobim_*.log，彙整 ERP / ToBim 排程 / ToBim 環景 Server 狀態後寄信。
 
-用途：確認 NAS 上 run_erp.sh / run_tobim.sh 是否有被 cron 喚起並正常結束（非業務明細）。
+用途：確認 NAS 上 run_erp.sh / run_tobim.sh 是否有被 cron 喚起；ToBim 另列環景 Server 複製業務結果。
 設定：.env 內 SMTP_*、EMAIL_TO；選填 DIGEST_SLOT（morning|afternoon）、DIGEST_DRY_RUN、NAS_LOG_DIR。
 """
 

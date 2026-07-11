@@ -194,7 +194,13 @@ sudo -n /usr/local/bin/docker run --rm \
 
 #### 健康檢查（NAS cron，不依賴 GitHub Actions）
 
-讀 `logs/erp_*.log`、`logs/tobim_*.log` 的 `[START]`/`[OK]`（非 GitHub API、非業務明細）。
+讀 `logs/erp_*.log`、`logs/tobim_*.log`：
+
+| 列 | 判斷依據 |
+|----|---------|
+| **ERP 借貸平衡** | `[START]` / `[OK]` — cron 是否存活 |
+| **ToBim 排程** | `[START]` / `[OK]` — cron 是否存活（COPY 失敗仍算 OK） |
+| **ToBim 環景 Server** | `結果：成功/失敗`、FAIL 分類 — 環景主機業務是否正常 |
 
 | 通道 | 腳本 | 節奏 | 說明 |
 |------|------|------|------|
@@ -214,7 +220,9 @@ HEALTH_WINDOW_HOURS=2     # Telegram 統計過去 N 小時
 
 Telegram 會依 job 預期執行窗判斷：ERP 工作日 08:30–17:30；ToBim 工作日 17:30 後～翌日 08:30 前。非執行窗顯示 ⏭ 略過。異常時會附 log 錯誤摘要，不必 SSH 查檔。
 
-ToBim 執行前會以短逾時（預設 5 秒）探測 `ASSETS_BASE_URL`：連不上則優雅略過（log 印 `SKIP  API 無法連線`），健康檢查顯示 🟡 而非 🔴。長期暫停可設 `TOBIM_PAUSED=1`（顯示 ⏭ 手動暫停）。
+Email 主旨範例：`ERP🟢 / ToBim 排程🟢 / 環景 Server🟠`。環景 Server 異常時，信內會附 CSV 格式、來源圖片缺失等明細（非 NAS 排程問題）。
+
+ToBim 執行前會以短逾時（預設 5 秒）探測 `ASSETS_BASE_URL`：連不上則優雅略過（log 印 `SKIP  API 無法連線`），環景 Server 列顯示 🔴。長期暫停可設 `TOBIM_PAUSED=1`（排程列顯示 ⏭ 手動暫停）。
 
 ```bash
 chmod +x run_health_email.sh run_health_check.sh

@@ -13,6 +13,7 @@ fi
 trap 'rmdir "$LOCK"' EXIT
 
 echo "$(date '+%F %T') [START] ToBim (docker py3.12)" >> "$LOG"
+set +e
 sudo -n /usr/local/bin/docker run --rm \
   --env-file "$BASE/.env" \
   -e SHOULD_RUN_MODE=offhours \
@@ -21,4 +22,6 @@ sudo -n /usr/local/bin/docker run --rm \
   -w /app \
   python:3.12-slim \
   bash -lc "pip -q install -r requirements.txt && python scripts/should_run.py && python scripts/tobim_copy_images_gps.py" >> "$LOG" 2>&1
+set -e
+# 排程健康：COPY 失敗或 should_run SKIP 仍視為跑完；Traceback 由健康檢查另判
 echo "$(date '+%F %T') [OK] ToBim" >> "$LOG"
