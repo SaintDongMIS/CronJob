@@ -17,7 +17,7 @@ from tobim_copy_images_gps import _int_env  # noqa: E402
 
 
 class TestShouldRunStrict(unittest.TestCase):
-    def test_strict_skip_exits_nonzero(self) -> None:
+    def test_strict_skip_exits_nonzero_offhours_during_day(self) -> None:
         fixed = __import__("datetime").datetime(
             2026, 6, 22, 10, 0, tzinfo=__import__("zoneinfo").ZoneInfo("Asia/Taipei")
         )
@@ -29,6 +29,19 @@ class TestShouldRunStrict(unittest.TestCase):
             dt_mod.now.return_value = fixed
             cal_cls.return_value.is_holiday.return_value = False
             self.assertEqual(should_run_main(), 1)
+
+    def test_strict_day_mode_runs_during_business_hours(self) -> None:
+        fixed = __import__("datetime").datetime(
+            2026, 6, 22, 10, 0, tzinfo=__import__("zoneinfo").ZoneInfo("Asia/Taipei")
+        )
+        with (
+            mock.patch.dict(os.environ, {"SHOULD_RUN_MODE": "day", "SHOULD_RUN_STRICT": "1"}),
+            mock.patch("should_run.datetime") as dt_mod,
+            mock.patch("should_run.TaiwanCalendar") as cal_cls,
+        ):
+            dt_mod.now.return_value = fixed
+            cal_cls.return_value.is_holiday.return_value = False
+            self.assertEqual(should_run_main(), 0)
 
     def test_strict_not_set_always_exits_zero(self) -> None:
         fixed = __import__("datetime").datetime(

@@ -3,7 +3,7 @@
 ## 功能
 
 - **ERP**：定時掃描「檢查自動分錄借貸不平衡」列表頁，篩選「沒有在鼎新」的列，並呼叫 `update_balance_status.asp`（每筆預設間隔 5 秒）。
-- **ToBim 環景**：於**工作日下班後**（台北 17:30 後至翌日 08:30 前；國定假日與週末不執行）掃描環景檔案瀏覽器上 ToBim 各案號內巷弄；若缺少 `.jpg` 與 `.txt` 則呼叫 `/api/copy-images-and-gps-sse`（等同「複製圖片及產生 Img_GPS」按鈕），兩者皆有則跳過。不依案號 `hasStreetView` 過濾；掃描時以案號層子資料夾的 `hasGpsTxt` 略過已完成巷弄，僅對待處理者查內容。
+- **ToBim 環景**：於**工作日上班時間**（台北 08:30～17:30；國定假日與週末不執行）掃描環景檔案瀏覽器上 ToBim 各案號內巷弄；若缺少 `.jpg` 與 `.txt` 則呼叫 `/api/copy-images-and-gps-sse`（等同「複製圖片及產生 Img_GPS」按鈕），兩者皆有則跳過。不依案號 `hasStreetView` 過濾；掃描時以案號層子資料夾的 `hasGpsTxt` 略過已完成巷弄，僅對待處理者查內容。
 
 ## 本機執行
 
@@ -25,68 +25,28 @@ TOBIM_DRY_RUN=0 python scripts/tobim_copy_images_gps.py
 python scripts/scan_tobim_all.py
 ```
 
-## GitHub Actions
+## Synology NAS（SSH）部署與排程
 
-### 排程總覽（台北時間 Asia/Taipei）
+專案在 NAS（例如 `192.168.98.48`）以 Docker 的 Python 3.12 執行腳本，並用 `/etc/cron.d` 排程。
 
-| 工作流程 | 腳本 | Cron 觸發（UTC） | 工作日業務頻率（約） |
-|----------|------|------------------|----------------------|
-| `erp-balance-update.yml` | `erp_update_not_in_dingxin.py` | `0,30 * * * *`（每 30 分，:00/:30） | 每 **30 分鐘** 一次 |
-| `tobim-copy-images-gps.yml` | `tobim_copy_images_gps.py` | `0 */2 * * *`（每 2 小時，:00） | 每 **2 小時** 一次 |
-| `health-digest-email.yml` | `workflow_health_email.py` | `0 2,7 * * *`（台北 10:00 / 15:00） | 每天都寄信（查 Actions 存活） |
+### 排程總覽（台北時間）
 
-（先前因 GitHub Actions 排程延遲曾刻意避開 **:00 / :30**；目前已改回整點/半點。）
+| Job | 腳本 | Cron | 工作日頻率（約） |
+|-----|------|------|------------------|
+| ERP | `erp_update_not_in_dingxin.py` | 每 30 分（`:00` / `:30`） | **18 次／日** |
+| ToBim | `tobim_copy_images_gps.py` | 平日 `08:30`～`17:00` 每小時 | **10 次／日** |
+| Email 早報 | `nas_health_email.py` | 每天 10:05 | — |
+| Email 午報 | `nas_health_email.py` | 每天 15:00 | — |
+| Telegram | `nas_health_check.py` | 平日 8～18 點每 2h | — |
 
 **Gate**（`scripts/should_run.py`，國定假日／週末一律不執行業務）：
 
-| 功能 | `SHOULD_RUN_MODE` | 允許時段（台北） |
-|------|-------------------|------------------|
-| **ERP** | `day`（預設） | **08:30～17:30**（含） |
-| **ToBim** | `offhours` | **17:30 後** 或 **翌日 08:30 前** |
+| 功能 | `SHOULD_RUN_MODE` | 允許時段 |
+|------|-------------------|----------|
+| **ERP** | `day`（預設） | **08:30～17:30** |
+| **ToBim** | `day` | **08:30～17:30** |
 
-其餘時間 workflow 仍可能被 cron 喚起，但只跑 gate、**不執行**業務腳本。
-
-**通過 Gate 後，業務腳本大約會在（台北）**：
-
-- **ERP**：09:00、09:30、10:00 … 直至 17:30（約 **18 次／工作日**）
-- **ToBim**：18:00、20:00、22:00、00:00、02:00、04:00、06:00（每 2 小時一檔，約 **7 次／工作日**；08:00 起屬上班時間會 SKIP）
-
-兩支為 **獨立 workflow**，頻率由各自 cron 決定。
-
-**健康檢查 Email**（與業務執行脫鉤）：
-
-| 班次 | 寄信時間（台北） | 統計區間 |
-|------|------------------|----------|
-| 早報 | **10:00** | 昨日 15:00 ～ 今日 10:00 |
-| 午報 | **15:00** | 今日 10:00 ～ 15:00 |
-
-一封郵件內含 **ERP + ToBim** 兩段，用 GitHub Actions 執行紀錄判斷排程是否正常（非業務結果彙總）。若改在 **NAS** 跑 ERP/ToBim，請改用下方 NAS 的 `run_health_email.sh`，可停用本 workflow。
-
-### Secrets / Variables
-
-**Secrets（建議）**
-
-- ERP：`ERP_COOKIE`、`ERP_DELAY_SEC`（選填）
-- ToBim：`TOBIM_DRY_RUN`（選填 Variables，預設 `0` 正式執行；其餘參數用腳本預設）
-- Email：`SMTP_HOST`、`SMTP_PORT`、`SMTP_USER`、`SMTP_PASSWORD`、`SMTP_FROM`、`EMAIL_TO`
-
-**Variables**
-
-- `ERP_LIST_URL`：必填
-
-### 健康檢查 Email（本機試寄）
-
-```bash
-# 需 GITHUB_TOKEN（repo read）與 .env 內 SMTP_*
-export GITHUB_REPOSITORY=owner/CronJob
-export GITHUB_TOKEN=ghp_...
-DIGEST_SLOT=morning DIGEST_DRY_RUN=1 python scripts/workflow_health_email.py
-python scripts/workflow_health_email.py
-```
-
-## Synology NAS（SSH）部署與排程（不依賴 GitHub Actions）
-
-若環境位於內網且不便使用 GitHub Actions，可將專案放到 NAS（例如 `192.168.98.48`）並用 Docker 的 Python 執行腳本，再用 `/etc/cron.d` 排程。
+cron 在非執行窗仍可能觸發 shell，但 `should_run.py` 會 SKIP 並 **exit 1**，不進入業務腳本。
 
 ### 目標
 
@@ -172,7 +132,7 @@ echo "$(date '+%F %T') [OK] ERP" >> "$LOG"
 
 `TOBIM_DRY_RUN` 由 **`.env` 控制**（正式 `0`、試跑 `1`）。預設每輪最多 COPY **10** 巷（`TOBIM_MAX_COPY_PER_RUN`）、巷間隔 **5** 秒（`TOBIM_DELAY_SEC`）。
 
-NAS 版已設 `SHOULD_RUN_STRICT=1`：上班時段 `should_run.py` 印 `SKIP` 並 **exit 1**，不進入業務腳本（與 GitHub Actions 一致）。
+NAS 版已設 `SHOULD_RUN_STRICT=1`：非執行窗（假日或 08:30 前／17:30 後）`should_run.py` 印 `SKIP` 並 **exit 1**，不進入業務腳本。
 
 若 NAS 上仍是舊版手寫腳本，請 `git pull` 後覆蓋或補上 `-e SHOULD_RUN_STRICT=1`。
 
@@ -192,7 +152,7 @@ sudo -n /usr/local/bin/docker run --rm \
   bash -lc "pip -q install -r requirements.txt && python scripts/scan_tobim_all.py"
 ```
 
-#### 健康檢查（NAS cron，不依賴 GitHub Actions）
+#### 健康檢查（NAS cron）
 
 讀 `logs/erp_*.log`、`logs/tobim_*.log`：
 
@@ -212,13 +172,14 @@ sudo -n /usr/local/bin/docker run --rm \
 ```bash
 TELEGRAM_BOT_TOKEN=123456:ABC...
 TELEGRAM_CHAT_ID=你的chat_id
-HEALTH_NOTIFY_OK=0        # 0=僅 warn/fail 發送；1=全綠也發
+HEALTH_NOTIFY_OK=0        # 已廢止；Telegram 固定每次回報 job 結果
 HEALTH_SKIP_HOLIDAY=1     # 放假日不發 Telegram
-HEALTH_GRACE_MIN=5        # START 後 N 分鐘內不計異常（避免 10:00 誤報）
+HEALTH_GRACE_MIN=5          # ERP：START 後 N 分鐘內不計異常
+HEALTH_GRACE_MIN_TOBIM=15   # ToBim：預設 15（複製 10 巷常需 10–15 分）；log 有 COPY 活動時最長寬限 30 分
 HEALTH_WINDOW_HOURS=2     # Telegram 統計過去 N 小時
 ```
 
-Telegram 會依 job 預期執行窗判斷：ERP 工作日 08:30–17:30；ToBim 工作日 17:30 後～翌日 08:30 前。非執行窗顯示 ⏭ 略過。異常時會附 log 錯誤摘要，不必 SSH 查檔。
+Telegram 會依 job 預期執行窗判斷：ERP / ToBim 皆為工作日 08:30–17:30。非執行窗顯示 ⏭ 略過。異常時會附 log 錯誤摘要，不必 SSH 查檔。
 
 Email 主旨範例：`ERP🟢 / ToBim 排程🟢 / 環景 Server🟠`。環景 Server 異常時，信內會附 CSV 格式、來源圖片缺失等明細（非 NAS 排程問題）。
 
@@ -238,7 +199,7 @@ sudo -n /usr/local/bin/docker run --rm \
 # Telegram 試跑（不真的發送）
 sudo -n /usr/local/bin/docker run --rm \
   --env-file /volume1/docker/CronJob/.env \
-  -e DIGEST_DRY_RUN=1 -e HEALTH_NOTIFY_OK=1 \
+  -e DIGEST_DRY_RUN=1 \
   -e NAS_HOSTNAME="$(hostname)" -e NAS_LOG_DIR=/app/logs \
   -v /volume1/docker/CronJob:/app -w /app \
   python:3.12-slim \
@@ -263,17 +224,16 @@ sudo -n sh -lc 'cat > /etc/cron.d/cronjob <<'"'"'EOF'"'"'
 # ERP: every 30 minutes (:00 / :30)
 0,30 * * * * jimWu01 /volume1/docker/CronJob/run_erp.sh
 
-# ToBim: every 2 hours at :00
-0 */2 * * * jimWu01 /volume1/docker/CronJob/run_tobim.sh
+# ToBim: weekdays hourly 08:30–17:30 (Taipei)
+30 8 * * 1-5 jimWu01 /volume1/docker/CronJob/run_tobim.sh
+0 9-17 * * 1-5 jimWu01 /volume1/docker/CronJob/run_tobim.sh
 
-# Health email: Taipei 10:05 / 15:05（:05 避開與業務同秒啟動誤報）
+# Health email: Taipei 10:05 / 15:00
 5 10 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh morning
-5 15 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh afternoon
+0 15 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh afternoon
 
-# Telegram health: weekdays 08–17 every 2h（ERP 監控）
-5 8,10,12,14,16 * * 1-5 jimWu01 /volume1/docker/CronJob/run_health_check.sh
-# Telegram health: weekdays 18–06 every 2h（ToBim 監控）
-5 18,20,22,0,2,4,6 * * 1-5 jimWu01 /volume1/docker/CronJob/run_health_check.sh
+# Telegram health: weekdays 8–18 every 2h
+5 8,10,12,14,16,18 * * 1-5 jimWu01 /volume1/docker/CronJob/run_health_check.sh
 EOF
 chmod 644 /etc/cron.d/cronjob
 synoschedtask --sync
@@ -305,6 +265,4 @@ git pull --ff-only
 - ToBim：`/volume1/docker/CronJob/logs/tobim_YYYY-MM-DD.log`
 - 健康檢查 Email：`/volume1/docker/CronJob/logs/health_email_YYYY-MM-DD.log`
 - 健康檢查 Telegram：`/volume1/docker/CronJob/logs/health_check_YYYY-MM-DD.log`
-
-> 若 ERP/ToBim 改在 NAS 執行，可停用 GitHub 的 `health-digest-email.yml`；改由 NAS 的 `run_health_email.sh`（早晚摘要）與 `run_health_check.sh`（Telegram 輪詢）監控。
 

@@ -3,8 +3,10 @@
 NAS 排程健康檢查（Telegram 輪詢）：讀取 logs/erp_*.log、logs/tobim_*.log。
 
 設定：.env 內 TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_ID；
-選填 HEALTH_WINDOW_HOURS（預設 2）、HEALTH_GRACE_MIN（預設 5）、
-HEALTH_NOTIFY_OK（1=全綠也發）、HEALTH_SKIP_HOLIDAY（1=放假日不發）、DIGEST_DRY_RUN。
+選填 HEALTH_WINDOW_HOURS（預設 2）、HEALTH_GRACE_MIN（ERP 預設 5）、
+HEALTH_GRACE_MIN_TOBIM（ToBim 預設 15）、
+HEALTH_SKIP_HOLIDAY（1=放假日不發）、DIGEST_DRY_RUN。
+Telegram 每次輪詢皆回報 ERP / ToBim 執行結果（含全綠）。
 """
 
 from __future__ import annotations

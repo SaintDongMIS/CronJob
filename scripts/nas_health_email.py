@@ -15,19 +15,17 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from health_common import (
+    ENV_DIGEST_DRY_RUN,
+    ENV_DIGEST_SLOT,
     TZ,
     collect_all_jobs,
     health_window,
+    load_smtp,
     project_root,
     render_html,
+    send_email,
     subject_from_items,
     truthy_env,
-)
-from workflow_health_email import (
-    ENV_DIGEST_DRY_RUN,
-    ENV_DIGEST_SLOT,
-    load_smtp,
-    send_email,
 )
 
 

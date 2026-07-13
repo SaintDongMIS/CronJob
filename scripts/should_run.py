@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-判斷 GitHub Actions 這次是否要執行更新。
+判斷 NAS cron 這次是否要執行業務腳本。
 
 條件（以 Asia/Taipei 判定）：
 - 非台灣政府行政機關「放假日」（包含週末與調整放假）
 - 時段依 SHOULD_RUN_MODE：
-  - day（預設，ERP）：08:30（含）～17:30（含）上班時間
-  - offhours（ToBim）：下班後 — 17:30 之後或翌日 08:30 之前
+  - day（ToBim / ERP）：08:30（含）～17:30（含）上班時間
+  - offhours（舊版）：下班後 — 17:30 之後或翌日 08:30 之前
 
-觸發頻率由各 workflow 的 cron 決定，本腳本不負責間隔。
-
-輸出：
-- 若在 GitHub Actions 環境，會寫入 $GITHUB_OUTPUT：should_run=true/false
-- 同時也會印出簡短判斷資訊
+觸發頻率由 `/etc/cron.d/cronjob` 決定，本腳本不負責間隔。
+執行時會印出簡短判斷資訊；若設 SHOULD_RUN_STRICT=1 且應 SKIP，則 exit 1。
 """
 
 from __future__ import annotations
@@ -48,14 +45,6 @@ class Window:
 
     def contains(self, t: time) -> bool:
         return self.start <= t <= self.end
-
-
-def _write_github_output(key: str, value: str) -> None:
-    path = os.environ.get("GITHUB_OUTPUT", "").strip()
-    if not path:
-        return
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(f"{key}={value}\n")
 
 
 def _resolve_mode() -> str:
@@ -97,7 +86,6 @@ def main() -> int:
     time_ok, time_label = _time_allowed(mode, now)
 
     should_run = (not is_holiday) and time_ok
-    _write_github_output("should_run", "true" if should_run else "false")
 
     day_type = "holiday" if is_holiday else "workday"
     print(

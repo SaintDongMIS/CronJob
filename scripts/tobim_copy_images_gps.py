@@ -136,10 +136,10 @@ def _require_csv_from_env() -> bool:
 
 
 def _dry_run_from_env() -> bool:
-    """未設定 TOBIM_DRY_RUN 時：本機預設 dry-run，GitHub Actions 預設正式執行。"""
+    """未設定 TOBIM_DRY_RUN 時預設 dry-run（本機安全）。"""
     if ENV_DRY_RUN in os.environ:
         return _truthy_env(ENV_DRY_RUN)
-    return os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true"
+    return True
 
 
 def load_settings() -> Settings:

@@ -1,13 +1,16 @@
 """
-NAS CronJob 健康檢查共用邏輯：log 解析、分 job 評估、Telegram / HTML 訊息。
+NAS CronJob 健康檢查共用邏輯：log 解析、分 job 評估、Email / Telegram 訊息。
 """
 
 from __future__ import annotations
 
 import os
 import re
+import smtplib
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -17,11 +20,20 @@ from taiwan_holidays.taiwan_calendar import TaiwanCalendar
 TZ = ZoneInfo("Asia/Taipei")
 ENV_NAS_LOG_DIR = "NAS_LOG_DIR"
 ENV_HEALTH_GRACE_MIN = "HEALTH_GRACE_MIN"
+ENV_HEALTH_GRACE_MIN_TOBIM = "HEALTH_GRACE_MIN_TOBIM"
 ENV_HEALTH_WINDOW_HOURS = "HEALTH_WINDOW_HOURS"
 ENV_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
 ENV_TELEGRAM_CHAT_ID = "TELEGRAM_CHAT_ID"
 ENV_HEALTH_NOTIFY_OK = "HEALTH_NOTIFY_OK"
 ENV_HEALTH_SKIP_HOLIDAY = "HEALTH_SKIP_HOLIDAY"
+ENV_SMTP_HOST = "SMTP_HOST"
+ENV_SMTP_PORT = "SMTP_PORT"
+ENV_SMTP_USER = "SMTP_USER"
+ENV_SMTP_PASSWORD = "SMTP_PASSWORD"
+ENV_SMTP_FROM = "SMTP_FROM"
+ENV_EMAIL_TO = "EMAIL_TO"
+ENV_DIGEST_SLOT = "DIGEST_SLOT"
+ENV_DIGEST_DRY_RUN = "DIGEST_DRY_RUN"
 
 MODE_DAY = "day"
 MODE_OFFHOURS = "offhours"
@@ -42,7 +54,15 @@ _TOBIM_SCAN = re.compile(r"掃描完成：略過 (\d+)，待處理 (\d+)")
 _TOBIM_FAIL = re.compile(r"FAIL\s+(\S+/\S+)\s+(.+)")
 _TOBIM_FAIL_CSV = re.compile(r"CSV|有效的圖片檔名")
 _TOBIM_FAIL_SOURCE = re.compile(r"複製後驗證失敗|jpg=0")
+_TOBIM_GATE = re.compile(r"decision=(RUN|SKIP)")
+_TOBIM_RUN_ACTIVITY = re.compile(r"^(COPY\s|OK\s+\d|FAIL\s|掃描完成|結果：)")
+_ERP_FORMS = re.compile(r"符合「.+」且可更新之表單數: (\d+)")
+_ERP_UPDATE = re.compile(r"\[\d+/\d+\] .+ -> (OK|FAIL)")
+_ERP_DRY_RUN = re.compile(r"DRY_RUN：")
 
+DEFAULT_GRACE_MIN = 5
+DEFAULT_GRACE_MIN_TOBIM = 15
+TOBIM_MAX_RUNTIME_MIN = 30
 TOBIM_SERVER_LABEL = "ToBim 環景 Server"
 DEFAULT_ASSETS_BASE_URL = "http://assets.bim-group.com:9880"
 
@@ -93,6 +113,16 @@ class JobHealth:
 
 
 @dataclass(frozen=True, slots=True)
+class SmtpSettings:
+    host: str
+    port: int
+    user: str
+    password: str
+    from_addr: str
+    to_addr: str
+
+
+@dataclass(frozen=True, slots=True)
 class TobimServerStats:
     copy_ok: int = 0
     copy_fail: int = 0
@@ -106,9 +136,27 @@ class TobimServerStats:
     last_result: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ErpBusinessStats:
+    forms_count: int = 0
+    update_ok: int = 0
+    update_fail: int = 0
+    dry_run: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TobimScheduleStats:
+    gate_runs: int = 0
+    gate_skips: int = 0
+    copy_ok: int = 0
+    copy_fail: int = 0
+    copy_skipped: int = 0
+    pending: int | None = None
+
+
 MONITORED_JOBS: tuple[JobSpec, ...] = (
     JobSpec(label="ERP 借貸平衡", log_prefix="erp", schedule_mode=MODE_DAY),
-    JobSpec(label="ToBim 排程", log_prefix="tobim", schedule_mode=MODE_OFFHOURS),
+    JobSpec(label="ToBim 排程", log_prefix="tobim", schedule_mode=MODE_DAY),
 )
 
 
@@ -137,8 +185,35 @@ def log_dir() -> Path:
     return project_root() / "logs"
 
 
-def grace_minutes() -> int:
-    return max(1, int_env(ENV_HEALTH_GRACE_MIN, 5))
+def grace_minutes_for(spec: JobSpec) -> int:
+    """ERP 約 1 分鐘內跑完；ToBim 複製 10 巷常需 10–15 分鐘。"""
+    if spec.log_prefix == "tobim":
+        fallback = int_env(ENV_HEALTH_GRACE_MIN, DEFAULT_GRACE_MIN_TOBIM)
+        return max(1, int_env(ENV_HEALTH_GRACE_MIN_TOBIM, fallback))
+    return max(1, int_env(ENV_HEALTH_GRACE_MIN, DEFAULT_GRACE_MIN))
+
+
+def _tobim_run_in_progress(log_files: list[Path], started_at: datetime) -> bool:
+    """START 之後若 log 已有複製活動、且尚未見 [OK] ToBim，視為仍在執行。"""
+    for path in log_files:
+        if not path.is_file():
+            continue
+        in_run = False
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            ts = _parse_line_time(line)
+            if ts is not None:
+                in_run = ts >= started_at
+                if in_run and _OK.search(line) and "ToBim" in line:
+                    return False
+                continue
+            if not in_run:
+                continue
+            if _TOBIM_RUN_ACTIVITY.match(line):
+                return True
+    return False
 
 
 def is_holiday(day: date) -> bool:
@@ -482,6 +557,154 @@ def parse_tobim_server_window(
     )
 
 
+def parse_erp_business_window(
+    paths: list[Path],
+    since: datetime,
+    until: datetime,
+) -> ErpBusinessStats:
+    forms_count = 0
+    update_ok = 0
+    update_fail = 0
+    dry_run = False
+    in_window = False
+    in_run = False
+
+    for path in paths:
+        if not path.is_file():
+            continue
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            ts = _parse_line_time(line)
+            if ts is not None:
+                in_window = since <= ts <= until
+                if not in_window:
+                    in_run = False
+                    continue
+            if not in_window:
+                continue
+
+            if _START.search(line):
+                in_run = True
+                continue
+            if _OK.search(line) or _LOCKED.search(line):
+                in_run = False
+                continue
+            if not in_run:
+                continue
+
+            forms_match = _ERP_FORMS.search(line)
+            if forms_match:
+                forms_count = int(forms_match.group(1))
+                continue
+            update_match = _ERP_UPDATE.search(line)
+            if update_match:
+                if update_match.group(1) == "OK":
+                    update_ok += 1
+                else:
+                    update_fail += 1
+                continue
+            if _ERP_DRY_RUN.search(line):
+                dry_run = True
+
+    return ErpBusinessStats(
+        forms_count=forms_count,
+        update_ok=update_ok,
+        update_fail=update_fail,
+        dry_run=dry_run,
+    )
+
+
+def parse_tobim_schedule_window(
+    paths: list[Path],
+    since: datetime,
+    until: datetime,
+) -> TobimScheduleStats:
+    gate_runs = 0
+    gate_skips = 0
+    copy_ok = 0
+    copy_fail = 0
+    copy_skipped = 0
+    pending: int | None = None
+    in_window = False
+
+    for path in paths:
+        if not path.is_file():
+            continue
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            ts = _parse_line_time(line)
+            if ts is not None:
+                in_window = since <= ts <= until
+            if not in_window:
+                continue
+
+            gate_match = _TOBIM_GATE.search(line)
+            if gate_match:
+                if gate_match.group(1) == "RUN":
+                    gate_runs += 1
+                else:
+                    gate_skips += 1
+                continue
+
+            result_match = _TOBIM_RESULT.search(line)
+            if result_match:
+                copy_ok += int(result_match.group(1))
+                copy_fail += int(result_match.group(2))
+                copy_skipped = max(copy_skipped, int(result_match.group(3)))
+                continue
+
+            scan_match = _TOBIM_SCAN.search(line)
+            if scan_match:
+                pending = int(scan_match.group(2))
+
+    return TobimScheduleStats(
+        gate_runs=gate_runs,
+        gate_skips=gate_skips,
+        copy_ok=copy_ok,
+        copy_fail=copy_fail,
+        copy_skipped=copy_skipped,
+        pending=pending,
+    )
+
+
+def _format_erp_execution_summary(
+    stats: LogRunStats,
+    biz: ErpBusinessStats,
+) -> str:
+    if stats.starts == 0:
+        return "時段內無執行"
+    parts = [f"跑完 {stats.oks}/{stats.starts} 次"]
+    if biz.dry_run:
+        parts.append(f"試跑｜待更新 {biz.forms_count} 筆（未 POST）")
+    elif biz.forms_count == 0:
+        parts.append("待更新 0 筆")
+    else:
+        parts.append(f"待更新 {biz.forms_count} 筆")
+        if biz.update_ok or biz.update_fail:
+            parts.append(f"成功 {biz.update_ok} / 失敗 {biz.update_fail}")
+    return "｜".join(parts)
+
+
+def _format_tobim_schedule_summary(
+    stats: LogRunStats,
+    sched: TobimScheduleStats,
+) -> str:
+    if stats.starts == 0:
+        return "時段內無執行"
+    parts = [f"跑完 {stats.oks}/{stats.starts} 次"]
+    if sched.gate_skips and sched.gate_runs == 0:
+        parts.append(f"SKIP {sched.gate_skips} 次（非執行窗）")
+    elif sched.copy_ok or sched.copy_fail:
+        parts.append(f"COPY 成功 {sched.copy_ok} / 失敗 {sched.copy_fail}")
+    if sched.pending is not None:
+        parts.append(f"待處理 {sched.pending} 巷")
+    return "｜".join(parts)
+
+
 def _assets_base_url() -> str:
     return os.environ.get("ASSETS_BASE_URL", "").strip() or DEFAULT_ASSETS_BASE_URL
 
@@ -554,12 +777,12 @@ def evaluate_tobim_server(
         if stats.last_event_at
         else None
     )
-    offhours = JobSpec(
+    day_window = JobSpec(
         label=TOBIM_SERVER_LABEL,
         log_prefix="tobim",
-        schedule_mode=MODE_OFFHOURS,
+        schedule_mode=MODE_DAY,
     )
-    if respect_schedule and not job_expected_in_window(offhours, since, until):
+    if respect_schedule and not job_expected_in_window(day_window, since, until):
         return JobHealth(
             label=TOBIM_SERVER_LABEL,
             log_label="tobim（業務）",
@@ -570,7 +793,7 @@ def evaluate_tobim_server(
             last_run_at=last_run_at,
             last_status=stats.last_result,
             status="skip",
-            status_note="非執行窗（工作日 17:30 後～翌日 08:30 前）",
+            status_note="非執行窗（工作日 08:30–17:30）",
             log_files=log_names,
         )
 
@@ -679,20 +902,37 @@ def evaluate_job(
             status="skip",
             status_note=f"非執行窗（{note}）",
             log_files=log_names,
+            execution_summary=_job_execution_summary(
+                spec, stats, log_files, since=since, until=until
+            ),
         )
 
     unfinished = max(0, stats.starts - stats.oks - stats.locked)
     period_fail = max(unfinished, stats.tracebacks)
     failure_snippet, suggestion = extract_failure_snippet(log_files, since, until)
 
+    grace = grace_minutes_for(spec)
+    started_at = stats.last_event_at
+    elapsed = (now - started_at) if started_at is not None else timedelta.max
+    in_grace = elapsed < timedelta(minutes=grace)
+    still_running = (
+        spec.log_prefix == "tobim"
+        and started_at is not None
+        and elapsed < timedelta(minutes=TOBIM_MAX_RUNTIME_MIN)
+        and _tobim_run_in_progress(log_files, started_at)
+    )
+
     if (
-        unfinished == 1
+        unfinished >= 1
         and stats.last_event_label == "START"
-        and stats.last_event_at is not None
-        and (now - stats.last_event_at) < timedelta(minutes=grace_minutes())
+        and started_at is not None
+        and (in_grace or still_running)
     ):
         period_fail = stats.tracebacks
-        status, note = "ok", f"執行中（{grace_minutes()} 分鐘內暫不計異常）"
+        if still_running and not in_grace:
+            status, note = "ok", "執行中（複製進行中，暫不計異常）"
+        else:
+            status, note = "ok", f"執行中（{grace} 分鐘內暫不計異常）"
     elif not log_files:
         status, note = "warn", "時段內找不到 log 檔"
     elif stats.starts == 0:
@@ -734,7 +974,27 @@ def evaluate_job(
         log_files=log_names,
         failure_snippet=failure_snippet,
         suggestion=suggestion,
+        execution_summary=_job_execution_summary(
+            spec, stats, log_files, since=since, until=until
+        ),
     )
+
+
+def _job_execution_summary(
+    spec: JobSpec,
+    stats: LogRunStats,
+    log_files: list[Path],
+    *,
+    since: datetime,
+    until: datetime,
+) -> str | None:
+    if spec.log_prefix == "erp":
+        biz = parse_erp_business_window(log_files, since, until)
+        return _format_erp_execution_summary(stats, biz)
+    if spec.log_prefix == "tobim":
+        sched = parse_tobim_schedule_window(log_files, since, until)
+        return _format_tobim_schedule_summary(stats, sched)
+    return None
 
 
 def collect_job_health(
@@ -795,9 +1055,13 @@ def status_badge(status: str) -> tuple[str, str]:
 
 
 def should_send_telegram(items: list[JobHealth]) -> bool:
-    if truthy_env(ENV_HEALTH_NOTIFY_OK):
-        return True
-    return any(item.status in ("warn", "fail", "degraded") for item in items)
+    """Telegram 固定回報各 job 執行結果（含全綠）。"""
+    return True
+
+
+def _plain_telegram_text(text: str) -> str:
+    plain = re.sub(r"<br\s*/?>", " / ", text, flags=re.IGNORECASE)
+    return re.sub(r"<[^>]+>", "", plain).strip()
 
 
 def render_telegram_message(
@@ -822,19 +1086,22 @@ def render_telegram_message(
     for item in items:
         icon, _text = status_badge(item.status)
         lines.append(f"{item.label} {icon}")
-        if item.status == "skip":
+        if item.execution_summary:
+            lines.append(f"  {_plain_telegram_text(item.execution_summary)}")
+        elif item.status == "skip":
             lines.append(f"  {item.status_note}")
             continue
-        if item.execution_summary:
-            lines.append(f"  {item.execution_summary.replace('<br>', ' / ')}")
         else:
             lines.append(
                 f"  {item.period_starts} 次啟動 / {item.period_ok} OK / "
                 f"{item.period_fail} 異常"
             )
+        if item.status == "skip" and not item.execution_summary:
+            lines.append(f"  {item.status_note}")
+            continue
         if item.last_run_at and item.last_status:
             lines.append(f"  最近：{item.last_run_at} {item.last_status}")
-        if item.status_note:
+        if item.status_note and item.status != "skip":
             lines.append(f"  {item.status_note}")
         if item.status in ("fail", "warn", "degraded") and item.failure_snippet:
             lines.append(f"  錯誤：{item.failure_snippet}")
@@ -928,11 +1195,53 @@ def render_html(
     </table>
     {details_section}
     <p style="margin:16px 0 0;font-size:12px;color:#888;">
-      執行窗參考：ERP 工作日 08:30–17:30；ToBim 工作日 17:30 後～翌日 08:30 前。
+      執行窗參考：ERP / ToBim 皆為工作日 08:30–17:30。
     </p>
   </div>
 </body>
 </html>"""
+
+
+def load_smtp() -> SmtpSettings:
+    host = os.environ.get(ENV_SMTP_HOST, "").strip()
+    user = os.environ.get(ENV_SMTP_USER, "").strip()
+    password = os.environ.get(ENV_SMTP_PASSWORD, "").strip()
+    from_addr = os.environ.get(ENV_SMTP_FROM, "").strip() or user
+    to_addr = os.environ.get(ENV_EMAIL_TO, "").strip()
+    port = int_env(ENV_SMTP_PORT, 587)
+    missing = [
+        k
+        for k, v in [
+            ("SMTP_HOST", host),
+            ("SMTP_USER", user),
+            ("SMTP_PASSWORD", password),
+            ("EMAIL_TO", to_addr),
+        ]
+        if not v
+    ]
+    if missing:
+        raise RuntimeError(f"缺少郵件設定：{', '.join(missing)}")
+    return SmtpSettings(
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        from_addr=from_addr,
+        to_addr=to_addr,
+    )
+
+
+def send_email(smtp: SmtpSettings, subject: str, html_body: str) -> None:
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = smtp.from_addr
+    msg["To"] = smtp.to_addr
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    with smtplib.SMTP(smtp.host, smtp.port, timeout=60) as server:
+        server.starttls()
+        server.login(smtp.user, smtp.password)
+        server.sendmail(smtp.from_addr, [smtp.to_addr], msg.as_string())
 
 
 def load_telegram() -> tuple[str, str]:
