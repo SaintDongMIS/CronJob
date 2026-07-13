@@ -13,7 +13,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from should_run import main as should_run_main  # noqa: E402
-from tobim_copy_images_gps import _int_env  # noqa: E402
+from tobim_copy_images_gps import _budget_exhausted, _int_env  # noqa: E402
 
 
 class TestShouldRunStrict(unittest.TestCase):
@@ -59,11 +59,28 @@ class TestShouldRunStrict(unittest.TestCase):
 
 
 class TestIntEnv(unittest.TestCase):
-    def test_max_copy_zero_means_unlimited_default(self) -> None:
+    def test_max_copy_zero_is_default_unlimited(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(_int_env("TOBIM_MAX_COPY_PER_RUN", default=10), 10)
-        with mock.patch.dict(os.environ, {"TOBIM_MAX_COPY_PER_RUN": "0"}):
-            self.assertEqual(_int_env("TOBIM_MAX_COPY_PER_RUN", default=10), 0)
+            self.assertEqual(_int_env("TOBIM_MAX_COPY_PER_RUN", default=0), 0)
+        with mock.patch.dict(os.environ, {"TOBIM_MAX_COPY_PER_RUN": "10"}):
+            self.assertEqual(_int_env("TOBIM_MAX_COPY_PER_RUN", default=0), 10)
+
+
+class TestRunBudget(unittest.TestCase):
+    def test_budget_exhausted_after_elapsed(self) -> None:
+        started = 1000.0
+        with mock.patch("tobim_copy_images_gps.time") as time_mod:
+            time_mod.monotonic.return_value = 1000.0
+            self.assertFalse(_budget_exhausted(started, 60.0))
+            time_mod.monotonic.return_value = 1059.9
+            self.assertFalse(_budget_exhausted(started, 60.0))
+            time_mod.monotonic.return_value = 1060.0
+            self.assertTrue(_budget_exhausted(started, 60.0))
+
+    def test_budget_zero_never_exhausted(self) -> None:
+        with mock.patch("tobim_copy_images_gps.time") as time_mod:
+            time_mod.monotonic.return_value = 999999.0
+            self.assertFalse(_budget_exhausted(0.0, 0.0))
 
 
 if __name__ == "__main__":

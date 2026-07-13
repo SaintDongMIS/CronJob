@@ -130,7 +130,7 @@ echo "$(date '+%F %T') [OK] ERP" >> "$LOG"
 
 #### `run_tobim.sh`（隨 repo 提供）
 
-`TOBIM_DRY_RUN` 由 **`.env` 控制**（正式 `0`、試跑 `1`）。預設每輪最多 COPY **10** 巷（`TOBIM_MAX_COPY_PER_RUN`）、巷間隔 **5** 秒（`TOBIM_DELAY_SEC`）。
+`TOBIM_DRY_RUN` 由 **`.env` 控制**（正式 `0`、試跑 `1`）。預設每輪 **時間預算 45 分鐘**（`TOBIM_RUN_BUDGET_SEC=2700`），時間內盡量 COPY；`TOBIM_MAX_COPY_PER_RUN=0` 表示不限制巷數（可設正整數作硬上限）。巷間隔 **5** 秒（`TOBIM_DELAY_SEC`）。
 
 NAS 版已設 `SHOULD_RUN_STRICT=1`：非執行窗（假日或 08:30 前／17:30 後）`should_run.py` 印 `SKIP` 並 **exit 1**，不進入業務腳本。
 
@@ -175,7 +175,7 @@ TELEGRAM_CHAT_ID=你的chat_id
 HEALTH_NOTIFY_OK=0        # 已廢止；Telegram 固定每次回報 job 結果
 HEALTH_SKIP_HOLIDAY=1     # 放假日不發 Telegram
 HEALTH_GRACE_MIN=5          # ERP：START 後 N 分鐘內不計異常
-HEALTH_GRACE_MIN_TOBIM=15   # ToBim：預設 15（複製 10 巷常需 10–15 分）；log 有 COPY 活動時最長寬限 30 分
+HEALTH_GRACE_MIN_TOBIM=15   # ToBim：預設 15（複製常需 10–15 分）；log 有 COPY 活動時最長寬限 50 分
 HEALTH_WINDOW_HOURS=2     # Telegram 統計過去 N 小時
 ```
 

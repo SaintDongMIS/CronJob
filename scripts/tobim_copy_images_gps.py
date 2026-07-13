@@ -36,11 +36,13 @@ ENV_REQUIRE_CSV = "TOBIM_REQUIRE_CSV"
 ENV_REQUEST_TIMEOUT_SEC = "TOBIM_REQUEST_TIMEOUT_SEC"
 ENV_SSE_TIMEOUT_SEC = "TOBIM_SSE_TIMEOUT_SEC"
 ENV_MAX_COPY_PER_RUN = "TOBIM_MAX_COPY_PER_RUN"
+ENV_RUN_BUDGET_SEC = "TOBIM_RUN_BUDGET_SEC"
 ENV_USER_AGENT = "TOBIM_USER_AGENT"
 
 _DEFAULT_BASE_URL = "http://assets.bim-group.com:9880"
 _DEFAULT_DELAY_SEC = 5.0
-_DEFAULT_MAX_COPY_PER_RUN = 10
+_DEFAULT_MAX_COPY_PER_RUN = 0
+_DEFAULT_RUN_BUDGET_SEC = 2700.0
 _DEFAULT_PROBE_TIMEOUT_SEC = 5.0
 _DEFAULT_REQUEST_TIMEOUT_SEC = 120.0
 _DEFAULT_SSE_TIMEOUT_SEC = 3600.0
@@ -60,6 +62,7 @@ class Settings:
     request_timeout_seconds: float
     sse_timeout_seconds: float
     max_copy_per_run: int
+    run_budget_seconds: float
     user_agent: str
 
 
@@ -158,6 +161,9 @@ def load_settings() -> Settings:
         ),
         max_copy_per_run=_int_env(
             ENV_MAX_COPY_PER_RUN, default=_DEFAULT_MAX_COPY_PER_RUN
+        ),
+        run_budget_seconds=_float_env(
+            ENV_RUN_BUDGET_SEC, default=_DEFAULT_RUN_BUDGET_SEC
         ),
         user_agent=_str_env(ENV_USER_AGENT, default=_DEFAULT_USER_AGENT),
     )
@@ -440,6 +446,18 @@ def run_copy_sse(
     )
 
 
+def _budget_exhausted(run_started: float, budget_seconds: float) -> bool:
+    if budget_seconds <= 0:
+        return False
+    return (time.monotonic() - run_started) >= budget_seconds
+
+
+def _format_budget_label(budget_seconds: float) -> str:
+    if budget_seconds <= 0:
+        return "off"
+    return f"{int(budget_seconds)}s"
+
+
 def main() -> int:
     settings = load_settings()
     session = requests.Session()
@@ -451,9 +469,11 @@ def main() -> int:
         if settings.max_copy_per_run > 0
         else "unlimited"
     )
+    budget_label = _format_budget_label(settings.run_budget_seconds)
     print(
         f"DRY_RUN={settings.dry_run}  REQUIRE_CSV={settings.require_csv}  "
-        f"DELAY={settings.delay_seconds}s  MAX_COPY={max_copy_label}"
+        f"DELAY={settings.delay_seconds}s  MAX_COPY={max_copy_label}  "
+        f"RUN_BUDGET={budget_label}"
     )
 
     early_exit = preflight_or_exit(settings, session)
@@ -500,13 +520,37 @@ def main() -> int:
     print(
         f"\n掃描完成：略過 {skipped}，待處理 {total_pending}"
         + (f"，本輪 COPY {len(pending_copy)}，延後 {deferred}" if deferred else "")
+        + (
+            f"，時間預算 {budget_label}"
+            if settings.run_budget_seconds > 0
+            else ""
+        )
     )
 
     if settings.dry_run:
         print("DRY_RUN：未呼叫 copy-images-and-gps-sse")
         return 0
 
+    run_started = time.monotonic()
+    budget_deferred = 0
+
     for index, task in enumerate(pending_copy):
+        if settings.max_copy_per_run > 0 and index >= settings.max_copy_per_run:
+            budget_deferred = len(pending_copy) - index
+            for deferred_task in pending_copy[index:]:
+                print(
+                    f"DEFER {deferred_task.case_id}/{deferred_task.subfolder_name}  "
+                    f"(本輪上限 {settings.max_copy_per_run})"
+                )
+            break
+        if _budget_exhausted(run_started, settings.run_budget_seconds):
+            budget_deferred = len(pending_copy) - index
+            for deferred_task in pending_copy[index:]:
+                print(
+                    f"DEFER {deferred_task.case_id}/{deferred_task.subfolder_name}  "
+                    f"(時間預算 {int(settings.run_budget_seconds)}s)"
+                )
+            break
         label = f"{task.case_id}/{task.subfolder_name}"
         status = (
             f"jpg={'Y' if task.has_jpg else 'N'} "
@@ -543,7 +587,10 @@ def main() -> int:
                 file=sys.stderr,
             )
 
-    print(f"\n結果：成功 {copied}，失敗 {failed}，略過 {skipped}")
+    print(
+        f"\n結果：成功 {copied}，失敗 {failed}，略過 {skipped}"
+        + (f"，時間預算延後 {budget_deferred}" if budget_deferred else "")
+    )
     return 1 if failed else 0
 
 
