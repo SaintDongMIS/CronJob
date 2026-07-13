@@ -16,7 +16,7 @@ echo "$(date '+%F %T') [START] ToBim (docker py3.12)" >> "$LOG"
 set +e
 sudo -n /usr/local/bin/docker run --rm \
   --env-file "$BASE/.env" \
-  -e SHOULD_RUN_MODE=day \
+  -e SHOULD_RUN_MODE=weekday \
   -e SHOULD_RUN_STRICT=1 \
   -v "$BASE":/app \
   -w /app \

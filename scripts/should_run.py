@@ -5,7 +5,8 @@
 條件（以 Asia/Taipei 判定）：
 - 非台灣政府行政機關「放假日」（包含週末與調整放假）
 - 時段依 SHOULD_RUN_MODE：
-  - day（ToBim / ERP）：08:30（含）～17:30（含）上班時間
+  - day（ERP）：08:30（含）～17:30（含）上班時間
+  - weekday（ToBim）：工作日全天（僅擋國定假日／週末）
   - offhours（舊版）：下班後 — 17:30 之後或翌日 08:30 之前
 
 觸發頻率由 `/etc/cron.d/cronjob` 決定，本腳本不負責間隔。
@@ -28,6 +29,7 @@ from taiwan_holidays.taiwan_calendar import TaiwanCalendar
 ENV_SHOULD_RUN_MODE = "SHOULD_RUN_MODE"
 ENV_SHOULD_RUN_STRICT = "SHOULD_RUN_STRICT"
 MODE_DAY = "day"
+MODE_WEEKDAY = "weekday"
 MODE_OFFHOURS = "offhours"
 
 BUSINESS_START = time(8, 30)
@@ -51,6 +53,8 @@ def _resolve_mode() -> str:
     raw = os.environ.get(ENV_SHOULD_RUN_MODE, MODE_DAY).strip().lower()
     if raw in (MODE_OFFHOURS, "off_hours", "night"):
         return MODE_OFFHOURS
+    if raw in (MODE_WEEKDAY, "weekdays", "all_day"):
+        return MODE_WEEKDAY
     return MODE_DAY
 
 
@@ -61,6 +65,8 @@ def _in_business_hours(now: datetime) -> bool:
 
 
 def _time_allowed(mode: str, now: datetime) -> tuple[bool, str]:
+    if mode == MODE_WEEKDAY:
+        return True, "weekday"
     in_business = _in_business_hours(now)
     if mode == MODE_OFFHOURS:
         allowed = not in_business

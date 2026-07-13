@@ -3,7 +3,7 @@
 ## 功能
 
 - **ERP**：定時掃描「檢查自動分錄借貸不平衡」列表頁，篩選「沒有在鼎新」的列，並呼叫 `update_balance_status.asp`（每筆預設間隔 5 秒）。
-- **ToBim 環景**：於**工作日上班時間**（台北 08:30～17:30；國定假日與週末不執行）掃描環景檔案瀏覽器上 ToBim 各案號內巷弄；若缺少 `.jpg` 與 `.txt` 則呼叫 `/api/copy-images-and-gps-sse`（等同「複製圖片及產生 Img_GPS」按鈕），兩者皆有則跳過。不依案號 `hasStreetView` 過濾；掃描時以案號層子資料夾的 `hasGpsTxt` 略過已完成巷弄，僅對待處理者查內容。
+- **ToBim 環景**：於**工作日全天**（台北時間；國定假日與週末不執行）掃描環景檔案瀏覽器上 ToBim 各案號內巷弄；若缺少 `.jpg` 與 `.txt` 則呼叫 `/api/copy-images-and-gps-sse`（等同「複製圖片及產生 Img_GPS」按鈕），兩者皆有則跳過。不依案號 `hasStreetView` 過濾；掃描時以案號層子資料夾的 `hasGpsTxt` 略過已完成巷弄，僅對待處理者查內容。
 
 ## 本機執行
 
@@ -34,19 +34,19 @@ python scripts/scan_tobim_all.py
 | Job | 腳本 | Cron | 工作日頻率（約） |
 |-----|------|------|------------------|
 | ERP | `erp_update_not_in_dingxin.py` | 每 30 分（`:00` / `:30`） | **18 次／日** |
-| ToBim | `tobim_copy_images_gps.py` | 平日 `08:30`～`17:00` 每小時 | **10 次／日** |
+| ToBim | `tobim_copy_images_gps.py` | 週一～五每小時（`0 * * * 1-5`） | **24 次／日** |
 | Email 早報 | `nas_health_email.py` | 每天 10:05 | — |
 | Email 午報 | `nas_health_email.py` | 每天 15:00 | — |
-| Telegram | `nas_health_check.py` | 平日 8～18 點每 2h | — |
+| Telegram | `nas_health_check.py` | 週一～五每 2 小時（含夜間） | **12 次／日** |
 
 **Gate**（`scripts/should_run.py`，國定假日／週末一律不執行業務）：
 
 | 功能 | `SHOULD_RUN_MODE` | 允許時段 |
 |------|-------------------|----------|
 | **ERP** | `day`（預設） | **08:30～17:30** |
-| **ToBim** | `day` | **08:30～17:30** |
+| **ToBim** | `weekday` | **工作日全天** |
 
-cron 在非執行窗仍可能觸發 shell，但 `should_run.py` 會 SKIP 並 **exit 1**，不進入業務腳本。
+ERP：cron 在非執行窗仍可能觸發，但 `should_run.py` 會 SKIP。ToBim：週末不觸發 cron；工作日任何時段皆可 RUN（假日 gate 仍擋）。
 
 ### 目標
 
@@ -132,7 +132,7 @@ echo "$(date '+%F %T') [OK] ERP" >> "$LOG"
 
 `TOBIM_DRY_RUN` 由 **`.env` 控制**（正式 `0`、試跑 `1`）。預設每輪 **時間預算 45 分鐘**（`TOBIM_RUN_BUDGET_SEC=2700`），時間內盡量 COPY；`TOBIM_MAX_COPY_PER_RUN=0` 表示不限制巷數（可設正整數作硬上限）。巷間隔 **5** 秒（`TOBIM_DELAY_SEC`）。
 
-NAS 版已設 `SHOULD_RUN_STRICT=1`：非執行窗（假日或 08:30 前／17:30 後）`should_run.py` 印 `SKIP` 並 **exit 1**，不進入業務腳本。
+NAS 版已設 `SHOULD_RUN_STRICT=1`：`SHOULD_RUN_MODE=weekday` 時僅擋國定假日／週末；ERP 仍為 `day`（08:30 前／17:30 後 SKIP）。
 
 若 NAS 上仍是舊版手寫腳本，請 `git pull` 後覆蓋或補上 `-e SHOULD_RUN_STRICT=1`。
 
@@ -179,7 +179,7 @@ HEALTH_GRACE_MIN_TOBIM=15   # ToBim：預設 15（複製常需 10–15 分）；
 HEALTH_WINDOW_HOURS=2     # Telegram 統計過去 N 小時
 ```
 
-Telegram 會依 job 預期執行窗判斷：ERP / ToBim 皆為工作日 08:30–17:30。非執行窗顯示 ⏭ 略過。異常時會附 log 錯誤摘要，不必 SSH 查檔。
+Telegram 會依 job 預期執行窗判斷：ERP 為工作日 08:30–17:30；ToBim 為工作日全天。週末／放假日顯示 ⏭ 略過。異常時會附 log 錯誤摘要，不必 SSH 查檔。
 
 Email 主旨範例：`ERP🟢 / ToBim 排程🟢 / 環景 Server🟠`。環景 Server 異常時，信內會附 CSV 格式、來源圖片缺失等明細（非 NAS 排程問題）。
 
@@ -224,16 +224,15 @@ sudo -n sh -lc 'cat > /etc/cron.d/cronjob <<'"'"'EOF'"'"'
 # ERP: every 30 minutes (:00 / :30)
 0,30 * * * * jimWu01 /volume1/docker/CronJob/run_erp.sh
 
-# ToBim: weekdays hourly 08:30–17:30 (Taipei)
-30 8 * * 1-5 jimWu01 /volume1/docker/CronJob/run_tobim.sh
-0 9-17 * * 1-5 jimWu01 /volume1/docker/CronJob/run_tobim.sh
+# ToBim: weekdays hourly 24h (Taipei)
+0 * * * 1-5 jimWu01 /volume1/docker/CronJob/run_tobim.sh
 
 # Health email: Taipei 10:05 / 15:00
 5 10 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh morning
 0 15 * * * jimWu01 /volume1/docker/CronJob/run_health_email.sh afternoon
 
-# Telegram health: weekdays 8–18 every 2h
-5 8,10,12,14,16,18 * * 1-5 jimWu01 /volume1/docker/CronJob/run_health_check.sh
+# Telegram health: weekdays every 2h (incl. night)
+5 0,2,4,6,8,10,12,14,16,18,20,22 * * 1-5 jimWu01 /volume1/docker/CronJob/run_health_check.sh
 EOF
 chmod 644 /etc/cron.d/cronjob
 synoschedtask --sync

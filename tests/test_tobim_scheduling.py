@@ -1,4 +1,4 @@
-"""should_run strict gate 與 ToBim 每輪上限。"""
+"""should_run strict gate、weekday 模式與 ToBim 每輪上限。"""
 
 from __future__ import annotations
 
@@ -56,6 +56,37 @@ class TestShouldRunStrict(unittest.TestCase):
             dt_mod.now.return_value = fixed
             cal_cls.return_value.is_holiday.return_value = False
             self.assertEqual(should_run_main(), 0)
+
+
+    def test_strict_weekday_mode_runs_at_night_on_workday(self) -> None:
+        fixed = __import__("datetime").datetime(
+            2026, 7, 14, 22, 0, tzinfo=__import__("zoneinfo").ZoneInfo("Asia/Taipei")
+        )
+        with (
+            mock.patch.dict(
+                os.environ, {"SHOULD_RUN_MODE": "weekday", "SHOULD_RUN_STRICT": "1"}
+            ),
+            mock.patch("should_run.datetime") as dt_mod,
+            mock.patch("should_run.TaiwanCalendar") as cal_cls,
+        ):
+            dt_mod.now.return_value = fixed
+            cal_cls.return_value.is_holiday.return_value = False
+            self.assertEqual(should_run_main(), 0)
+
+    def test_strict_weekday_mode_skips_on_holiday(self) -> None:
+        fixed = __import__("datetime").datetime(
+            2026, 7, 14, 22, 0, tzinfo=__import__("zoneinfo").ZoneInfo("Asia/Taipei")
+        )
+        with (
+            mock.patch.dict(
+                os.environ, {"SHOULD_RUN_MODE": "weekday", "SHOULD_RUN_STRICT": "1"}
+            ),
+            mock.patch("should_run.datetime") as dt_mod,
+            mock.patch("should_run.TaiwanCalendar") as cal_cls,
+        ):
+            dt_mod.now.return_value = fixed
+            cal_cls.return_value.is_holiday.return_value = True
+            self.assertEqual(should_run_main(), 1)
 
 
 class TestIntEnv(unittest.TestCase):

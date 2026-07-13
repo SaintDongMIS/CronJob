@@ -36,6 +36,7 @@ ENV_DIGEST_SLOT = "DIGEST_SLOT"
 ENV_DIGEST_DRY_RUN = "DIGEST_DRY_RUN"
 
 MODE_DAY = "day"
+MODE_WEEKDAY = "weekday"
 MODE_OFFHOURS = "offhours"
 BUSINESS_START = time(8, 30)
 BUSINESS_END = time(17, 30)
@@ -77,7 +78,7 @@ SUBJECT_LABELS: dict[str, str] = {
 class JobSpec:
     label: str
     log_prefix: str
-    schedule_mode: str  # day | offhours
+    schedule_mode: str  # day | weekday | offhours
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +157,7 @@ class TobimScheduleStats:
 
 MONITORED_JOBS: tuple[JobSpec, ...] = (
     JobSpec(label="ERP 借貸平衡", log_prefix="erp", schedule_mode=MODE_DAY),
-    JobSpec(label="ToBim 排程", log_prefix="tobim", schedule_mode=MODE_DAY),
+    JobSpec(label="ToBim 排程", log_prefix="tobim", schedule_mode=MODE_WEEKDAY),
 )
 
 
@@ -229,6 +230,14 @@ def _in_business_hours(now: datetime) -> bool:
     return BUSINESS_START <= current <= BUSINESS_END
 
 
+def _schedule_window_note(spec: JobSpec) -> str:
+    if spec.schedule_mode == MODE_DAY:
+        return "工作日 08:30–17:30"
+    if spec.schedule_mode == MODE_WEEKDAY:
+        return "工作日全天"
+    return "工作日 17:30 後～翌日 08:30 前"
+
+
 def job_expected_in_window(
     spec: JobSpec,
     since: datetime,
@@ -241,6 +250,8 @@ def job_expected_in_window(
     probe = since
     while probe <= until:
         if not is_holiday(probe.date()):
+            if spec.schedule_mode == MODE_WEEKDAY:
+                return True
             in_business = _in_business_hours(probe)
             if spec.schedule_mode == MODE_DAY and in_business:
                 return True
@@ -780,7 +791,7 @@ def evaluate_tobim_server(
     day_window = JobSpec(
         label=TOBIM_SERVER_LABEL,
         log_prefix="tobim",
-        schedule_mode=MODE_DAY,
+        schedule_mode=MODE_WEEKDAY,
     )
     if respect_schedule and not job_expected_in_window(day_window, since, until):
         return JobHealth(
@@ -793,7 +804,7 @@ def evaluate_tobim_server(
             last_run_at=last_run_at,
             last_status=stats.last_result,
             status="skip",
-            status_note="非執行窗（工作日 08:30–17:30）",
+            status_note=f"非執行窗（{_schedule_window_note(day_window)}）",
             log_files=log_names,
         )
 
@@ -885,11 +896,7 @@ def evaluate_job(
     last_status = stats.last_event_label
 
     if respect_schedule and not job_expected_in_window(spec, since, until):
-        note = (
-            "工作日 08:30–17:30"
-            if spec.schedule_mode == MODE_DAY
-            else "工作日 17:30 後～翌日 08:30 前"
-        )
+        note = _schedule_window_note(spec)
         return JobHealth(
             label=spec.label,
             log_label=spec.log_prefix,
@@ -1195,7 +1202,7 @@ def render_html(
     </table>
     {details_section}
     <p style="margin:16px 0 0;font-size:12px;color:#888;">
-      執行窗參考：ERP / ToBim 皆為工作日 08:30–17:30。
+      執行窗參考：ERP 為工作日 08:30–17:30；ToBim 為工作日全天。
     </p>
   </div>
 </body>
